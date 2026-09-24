@@ -10,7 +10,7 @@ max_model_calls = 6
 [reviewers.grok]
 adapter = "opencode"
 executable = "opencode"
-model = "openrouter/x-ai/grok-4.7"
+model = "openrouter/z-ai/glm-5.3-flash"
 reasoning = "high"
 timeout_seconds = 3600
 

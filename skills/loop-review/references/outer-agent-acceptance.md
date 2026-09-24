@@ -15,7 +15,7 @@ The controller decides whether the review process converged and emits one of its
 
 The outer agent decides whether to accept that review conclusion in the context of the user's original request.
 
-Do not ask Grok or DeepSeek to make this acceptance decision.
+Do not ask either reviewer worker to make this acceptance decision.
 
 ## Required inputs
 

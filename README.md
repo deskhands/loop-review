@@ -89,7 +89,7 @@ You need:
 
 The default example configuration uses:
 
-- Grok 4.7 via OpenCode with `high` reasoning
+- GLM-5.3 Flash via OpenCode/OpenRouter with `high` reasoning
 - DeepSeek via Claude Code with `max` reasoning
 
 Model identifiers and executable locations are configurable.
@@ -123,7 +123,7 @@ max_model_calls = 6
 [reviewers.grok]
 adapter = "opencode"
 executable = "opencode"
-model = "openrouter/x-ai/grok-4.7"
+model = "openrouter/z-ai/glm-5.3-flash"
 reasoning = "high"
 timeout_seconds = 3600
 
@@ -135,7 +135,7 @@ reasoning = "max"
 timeout_seconds = 1800
 ```
 
-The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Grok receives a larger ceiling because repository inspection can legitimately run for many tool steps even at `high` reasoning.
+The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Reviewer A receives a larger ceiling because repository inspection can legitimately run for many tool steps even at `high` reasoning. The `[reviewers.grok]` table name is retained as a backward-compatible internal configuration key; the default model is GLM-5.3 Flash.
 
 If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
 

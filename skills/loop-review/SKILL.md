@@ -1,6 +1,6 @@
 ---
 name: loop-review
-description: Orchestrate an auditable, read-only multi-model review loop for design proposals, code changes, or an existing review. Use when the user asks for loop-review, wants a design/code review to converge across Grok and DeepSeek, or wants an existing review independently verified. The skill records original inputs without summarizing them, enforces applicable AGENTS.md rules on every round, runs blind parallel discovery followed by bounded serial cross-checks, and returns a frozen review status without modifying the reviewed target.
+description: Orchestrate an auditable, read-only multi-model review loop for design proposals, code changes, or an existing review. Use when the user asks for loop-review, wants a design/code review to converge across two independent reviewers, or wants an existing review independently verified. The skill records original inputs without summarizing them, enforces applicable AGENTS.md rules on every round, runs blind parallel discovery followed by bounded serial cross-checks, and returns a frozen review status without modifying the reviewed target.
 ---
 
 # loop-review
@@ -28,7 +28,7 @@ Run the deterministic controller; do not reproduce its orchestration in conversa
 9. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
 10. If the controller fails, report its failure code and run directory. If a detached job is `ORPHANED`, report that the local controller process ended without a terminal result; do not silently restart it or bypass a reviewer.
 
-The controller owns prompt construction, reviewer ordering, timeouts, state transitions, evidence retention, and freeze decisions. Grok/DeepSeek workers must not be called separately as a substitute for the controller. The outer agent alone owns acceptance of the frozen review in the context of the original user request.
+The controller owns prompt construction, reviewer ordering, timeouts, state transitions, evidence retention, and freeze decisions. Reviewer workers must not be called separately as a substitute for the controller. The outer agent alone owns acceptance of the frozen review in the context of the original user request.
 
 ## Input rules
 
