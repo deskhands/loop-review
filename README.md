@@ -139,6 +139,8 @@ The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Grok re
 
 If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
 
+Cross-check ledger updates are applied transactionally. New findings receive stable IDs first; `REFINE` and `DUPLICATE_OF` relations are resolved to canonical targets before any ledger mutation is committed. Duplicate/superseded chains are flattened, cycles are rejected deterministically, and adjudication array order does not change the resulting ledger. A relation failure leaves the previous ledger unchanged.
+
 Use CLI/provider-native authentication. Do not put API keys or access tokens in this configuration file.
 
 If `claude` or `opencode` is not on `PATH`, set `executable` to an explicit path such as `~/.local/bin/claude`.
