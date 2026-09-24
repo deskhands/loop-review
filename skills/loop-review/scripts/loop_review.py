@@ -30,11 +30,17 @@ def parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run loop review")
     run.add_argument("--invocation", required=True, help="Invocation JSON path")
-    run.add_argument("--dry-run", action="store_true", help="Prepare inputs/prompts without model calls")
-    run.add_argument(
+    run.add_argument("--dry-run", action="store_true", help="Prepare inputs/prompts synchronously without model calls")
+    execution = run.add_mutually_exclusive_group()
+    execution.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run a real review synchronously in the calling shell (debug/manual use)",
+    )
+    execution.add_argument(
         "--detach",
         action="store_true",
-        help="Run independently from the calling shell and return a durable job id immediately",
+        help="Compatibility alias for the default real-review execution mode",
     )
 
     status = sub.add_parser("status", help="Read a detached review job status")
@@ -99,6 +105,7 @@ def _start_detached(args: argparse.Namespace, cfg: Dict[str, Any]) -> Dict[str, 
         "run",
         "--invocation",
         str(invocation),
+        "--foreground",
     ]
     if args.dry_run:
         argv.append("--dry-run")
@@ -193,7 +200,7 @@ def main() -> int:
         cfg = load_config(expand_path(args.config))
         if args.command == "status":
             result = _detached_status(cfg, args.job)
-        elif args.command == "run" and args.detach:
+        elif args.command == "run" and not args.dry_run and not args.foreground:
             result = _start_detached(args, cfg)
         else:
             skill_root = SCRIPT_DIR.parent

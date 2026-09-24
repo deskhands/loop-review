@@ -6,7 +6,7 @@ Flow:
 
 Any infrastructure/protocol failure goes to `FAILED`.
 
-For long outer-agent sessions, `run --detach` starts the same controller in a new local process session and returns a durable `job_id`. `status --job <job_id>` reads that detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; V1 does not automatically restart or resume it.
+A real `run` starts the same controller in a new local process session by default and returns a durable `job_id`; `--foreground` is reserved for explicit debugging/manual synchronous execution, while `--dry-run` stays synchronous. `status --job <job_id>` reads the detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; V1 does not automatically restart or resume it.
 
 Cross-check ledger updates are transactional and order-independent. The controller assigns stable IDs to new findings first, resolves `REFINE`/`DUPLICATE_OF` relations to canonical targets (flattening duplicate/superseded chains), validates the full relation graph for unknown targets and cycles, then commits the batch atomically. A failed relation batch leaves the prior ledger unchanged.
 

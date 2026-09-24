@@ -13,11 +13,11 @@ Run the deterministic controller; do not reproduce its orchestration in conversa
 2. Preserve the user's request and supplied target text verbatim. Do not summarize or rewrite them.
 3. Determine the repository root. V1 requires the supplied repository to be a Git repository for every mode so repository state can be fingerprinted and audited.
 4. Build an invocation JSON matching [references/invocation.md](references/invocation.md).
-5. Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`, then start the review detached so it survives an outer-agent/tool-session disconnect:
+5. Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`, then start the review:
    ```bash
-   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --detach
+   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json>
    ```
-   Preserve the returned `job_id`. Do not start a second review for the same request merely because the outer session was interrupted.
+   Real reviews run detached by default so they survive an outer-agent/tool-session disconnect. Preserve the returned `job_id`. Do not start a second review for the same request merely because the outer session was interrupted. Use `--foreground` only for explicit debugging/manual synchronous execution.
 6. Query the detached job:
    ```bash
    python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
@@ -67,9 +67,14 @@ Prepare a run without model calls:
 python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --dry-run
 ```
 
-Start a durable detached review:
+Start a durable review (detached by default):
 ```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --detach
+python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json>
+```
+
+Run synchronously only for explicit debugging/manual use:
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --foreground
 ```
 
 Check a detached review:
