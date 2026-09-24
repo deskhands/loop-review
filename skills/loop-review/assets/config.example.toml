@@ -1,0 +1,22 @@
+version = 1
+
+[paths]
+run_root = "~/code/agents-tmp/loop-review"
+
+[loop]
+max_cycles = 2
+max_model_calls = 6
+
+[reviewers.grok]
+adapter = "opencode"
+executable = "opencode"
+model = "openrouter/x-ai/grok-4.7"
+reasoning = "high"
+timeout_seconds = 900
+
+[reviewers.deepseek]
+adapter = "claude"
+executable = "claude"
+model = "deepseek-flash[1m]"
+reasoning = "max"
+timeout_seconds = 900
