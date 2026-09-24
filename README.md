@@ -192,6 +192,8 @@ The command returns immediately with a durable `job_id`. Query that same review 
 python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
 ```
 
+If status is `RUNNING`, normally return control to the outer conversation and check the same `job_id` on a later turn. Do not continuously poll with short sleeps. Only when the outer agent judges that waiting in the current turn is useful should it wait about 120 seconds before one additional status check.
+
 If the exact job id was lost, `status` without `--job` resolves the most recent detached job. `--dry-run` remains synchronous, and `--foreground` is available only for explicit debugging/manual synchronous execution. The older `--detach` flag remains accepted as a compatibility alias for the default behavior.
 
 Detached execution deliberately uses no daemon, database, queue, or server: it is the same controller process started in a new OS session, with a small metadata/stdout/stderr record under `<run_root>/_jobs/`. If that local process itself disappears before producing a terminal result, status is `ORPHANED`; automatic crash-resume is intentionally out of scope.
