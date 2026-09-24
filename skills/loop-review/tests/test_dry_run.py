@@ -51,6 +51,8 @@ class DryRunTests(unittest.TestCase):
             prompt = (run_dir / "rounds" / "00-discovery" / "grok" / "prompt.md").read_text()
             self.assertIn(str((root / "AGENTS.md").resolve()), prompt)
             self.assertIn("Review verbatim.", prompt)
+            self.assertIn("rule_refs is reserved exclusively", prompt)
+            self.assertIn("ADRs, design documents, source files, tests, requirements", prompt)
 
 
 if __name__ == "__main__":

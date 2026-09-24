@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .base import ReviewerAdapter
-from ..util import LoopReviewError, run_cmd, write_text
+from ..util import LoopReviewError, atomic_json, run_cmd, write_text
 
 
 _READ_ONLY_CONFIG = {
@@ -129,28 +129,84 @@ class OpenCodeAdapter(ReviewerAdapter):
         read_dirs: Optional[List[Path]] = None,
     ) -> Dict[str, Any]:
         out_dir.mkdir(parents=True, exist_ok=True)
+        timeout_seconds = int(self.config["timeout_seconds"])
         started = time.time()
-        cp = run_cmd(
-            self._argv(cwd, prompt),
-            cwd=cwd,
-            env=self._env(),
-            timeout=int(self.config["timeout_seconds"]),
-        )
+        try:
+            cp = run_cmd(
+                self._argv(cwd, prompt),
+                cwd=cwd,
+                env=self._env(),
+                timeout=timeout_seconds,
+            )
+        except LoopReviewError as e:
+            duration_ms = int((time.time() - started) * 1000)
+            if e.code == "TIMEOUT":
+                write_text(out_dir / "raw.stdout", str(e.details.get("stdout", "")))
+                write_text(out_dir / "raw.stderr", str(e.details.get("stderr", "")))
+                meta = {
+                    "status": "TIMEOUT",
+                    "duration_ms": duration_ms,
+                    "exit_code": None,
+                    "model": self.config["model"],
+                    "reasoning": self.config["reasoning"],
+                    "timeout_seconds": timeout_seconds,
+                }
+                atomic_json(out_dir / "meta.json", meta)
+                atomic_json(
+                    out_dir / "error.json",
+                    {
+                        "code": e.code,
+                        "message": e.message,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
+                raise LoopReviewError(
+                    "TIMEOUT",
+                    e.message,
+                    {
+                        "timeout_seconds": timeout_seconds,
+                        "partial_stdout_bytes": len(str(e.details.get("stdout", "")).encode("utf-8")),
+                        "partial_stderr_bytes": len(str(e.details.get("stderr", "")).encode("utf-8")),
+                        "artifacts": {
+                            "stdout": str((out_dir / "raw.stdout").resolve()),
+                            "stderr": str((out_dir / "raw.stderr").resolve()),
+                            "meta": str((out_dir / "meta.json").resolve()),
+                            "error": str((out_dir / "error.json").resolve()),
+                        },
+                    },
+                )
+            raise
+
         duration_ms = int((time.time() - started) * 1000)
         write_text(out_dir / "raw.stdout", cp.stdout)
         write_text(out_dir / "raw.stderr", cp.stderr)
+        meta = {
+            "status": "OK" if cp.returncode == 0 else "FAILED",
+            "duration_ms": duration_ms,
+            "exit_code": cp.returncode,
+            "model": self.config["model"],
+            "reasoning": self.config["reasoning"],
+            "timeout_seconds": timeout_seconds,
+        }
         if cp.returncode != 0:
+            atomic_json(out_dir / "meta.json", meta)
+            atomic_json(
+                out_dir / "error.json",
+                {
+                    "code": "NON_ZERO_EXIT",
+                    "message": f"OpenCode reviewer exited {cp.returncode}",
+                },
+            )
             raise LoopReviewError(
                 "NON_ZERO_EXIT",
                 f"OpenCode reviewer exited {cp.returncode}",
                 {"stderr": cp.stderr[-4000:], "stdout": cp.stdout[-4000:]},
             )
-        return {
-            "result": self._extract_json(cp.stdout),
-            "meta": {
-                "duration_ms": duration_ms,
-                "exit_code": cp.returncode,
-                "model": self.config["model"],
-                "reasoning": self.config["reasoning"],
-            },
-        }
+        try:
+            result = self._extract_json(cp.stdout)
+        except LoopReviewError as e:
+            meta["status"] = "FAILED"
+            atomic_json(out_dir / "meta.json", meta)
+            atomic_json(out_dir / "error.json", {"code": e.code, "message": e.message})
+            raise
+        return {"result": result, "meta": meta}

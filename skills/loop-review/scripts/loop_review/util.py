@@ -81,7 +81,23 @@ def run_cmd(
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        raise LoopReviewError("TIMEOUT", f"Command timed out after {timeout}s: {argv[0]}", {"argv": argv})
+        def _text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value)
+
+        raise LoopReviewError(
+            "TIMEOUT",
+            f"Command timed out after {timeout}s: {argv[0]}",
+            {
+                "argv": argv,
+                "timeout_seconds": timeout,
+                "stdout": _text(e.stdout or e.output),
+                "stderr": _text(e.stderr),
+            },
+        )
     except FileNotFoundError:
         raise LoopReviewError("CLI_NOT_FOUND", f"Executable not found: {argv[0]}", {"argv": argv})
 

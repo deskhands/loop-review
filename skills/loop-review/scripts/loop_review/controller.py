@@ -331,17 +331,33 @@ class LoopReviewController:
         )
         out_dir.mkdir(parents=True, exist_ok=True)
         write_text(out_dir / "prompt.md", prompt)
-        response = self.reviewers[name].review(
-            prompt,
-            prepared["repo"],
-            run_dir,
-            out_dir,
-            prepared.get("read_dirs", []),
-        )
-        result = validate_result(response["result"], prepared["policy_paths"], active if phase != "discovery" else None)
-        if phase == "discovery" and result["adjudications"]:
-            raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Discovery result must not adjudicate findings")
+        response: Optional[Dict[str, Any]] = None
+        try:
+            response = self.reviewers[name].review(
+                prompt,
+                prepared["repo"],
+                run_dir,
+                out_dir,
+                prepared.get("read_dirs", []),
+            )
+            result = validate_result(
+                response["result"],
+                prepared["policy_paths"],
+                active if phase != "discovery" else None,
+            )
+            if phase == "discovery" and result["adjudications"]:
+                raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Discovery result must not adjudicate findings")
+        except LoopReviewError as e:
+            if response is not None:
+                atomic_json(out_dir / "result.invalid.json", response["result"])
+                meta = dict(response["meta"])
+                meta["status"] = "FAILED"
+                atomic_json(out_dir / "meta.json", meta)
+                atomic_json(out_dir / "error.json", {"code": e.code, "message": e.message})
+            raise
+
         atomic_json(out_dir / "result.json", result)
+        atomic_json(out_dir / "meta.json", response["meta"])
         return {"result": result, "meta": response["meta"], "prompt": prompt}
 
     def run(self, invocation_path: Path, dry_run: bool = False) -> Dict[str, Any]:
@@ -379,11 +395,13 @@ class LoopReviewController:
                         "adapter": self.config["reviewers"]["grok"]["adapter"],
                         "model": self.config["reviewers"]["grok"]["model"],
                         "reasoning": self.config["reviewers"]["grok"]["reasoning"],
+                        "timeout_seconds": int(self.config["reviewers"]["grok"]["timeout_seconds"]),
                     },
                     "reviewer-b": {
                         "adapter": self.config["reviewers"]["deepseek"]["adapter"],
                         "model": self.config["reviewers"]["deepseek"]["model"],
                         "reasoning": self.config["reviewers"]["deepseek"]["reasoning"],
+                        "timeout_seconds": int(self.config["reviewers"]["deepseek"]["timeout_seconds"]),
                     },
                 },
             }
@@ -442,13 +460,42 @@ class LoopReviewController:
                     phase="discovery",
                 )
 
+            discovery_errors: Dict[str, LoopReviewError] = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [pool.submit(discovery_call, name) for name in ("grok", "deepseek")]
-                for future in futures:
-                    name, response = future.result()
-                    discovery[name] = response
-                    state["review_calls"] += 1
+                futures = {
+                    pool.submit(discovery_call, name): name
+                    for name in ("grok", "deepseek")
+                }
+                state["review_calls"] += len(futures)
+                atomic_json(run_dir / "state" / "state.json", state)
+                for future in concurrent.futures.as_completed(futures):
+                    expected_name = futures[future]
+                    try:
+                        name, response = future.result()
+                        discovery[name] = response
+                    except LoopReviewError as e:
+                        discovery_errors[expected_name] = e
+                    except Exception as e:
+                        discovery_errors[expected_name] = LoopReviewError(
+                            "UNEXPECTED_ERROR",
+                            str(e),
+                            {"exception_type": type(e).__name__},
+                        )
+
             self._verify_fingerprint(prepared)
+            if discovery_errors:
+                first_name = next(iter(discovery_errors))
+                first_error = discovery_errors[first_name]
+                details = dict(first_error.details)
+                details["reviewer"] = self.aliases[first_name]
+                details["discovery_failures"] = {
+                    name: {
+                        "code": error.code,
+                        "message": error.message,
+                    }
+                    for name, error in discovery_errors.items()
+                }
+                raise LoopReviewError(first_error.code, first_error.message, details)
 
             ledger = new_ledger()
             summaries: List[str] = []
@@ -475,6 +522,8 @@ class LoopReviewController:
                 for name in order:
                     if state["review_calls"] >= max_calls:
                         raise LoopReviewError("MODEL_CALL_BUDGET_EXCEEDED", "Review model call budget exceeded")
+                    state["review_calls"] += 1
+                    atomic_json(run_dir / "state" / "state.json", state)
                     current_active = active_ids(ledger)
                     out_dir = run_dir / "rounds" / f"{cycle:02d}-cross-check" / name
                     response = self._run_worker(
@@ -486,7 +535,6 @@ class LoopReviewController:
                         active=current_active,
                         phase="cross-check",
                     )
-                    state["review_calls"] += 1
                     stable_map, added = apply_crosscheck_result(
                         ledger, response["result"], self.aliases[name], cycle
                     )

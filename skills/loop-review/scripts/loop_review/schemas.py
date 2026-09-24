@@ -19,8 +19,12 @@ EVIDENCE_SCHEMA = {
 
 RULE_REF_SCHEMA = {
     "type": "object",
+    "description": "Reference to a binding rule from an applicable AGENTS.md only. Use evidence for ADRs, design docs, source files, tests, requirements, or other project documents.",
     "properties": {
-        "path": {"type": "string"},
+        "path": {
+            "type": "string",
+            "description": "Exact path of one applicable AGENTS.md listed in the prompt; never an ADR, design document, source file, test, or requirement document.",
+        },
         "description": {"type": "string"},
     },
     "required": ["path", "description"],
@@ -73,7 +77,11 @@ RESULT_SCHEMA: Dict[str, Any] = {
                     "title": {"type": "string"},
                     "claim": {"type": "string"},
                     "evidence": {"type": "array", "items": EVIDENCE_SCHEMA},
-                    "rule_refs": {"type": "array", "items": RULE_REF_SCHEMA},
+                    "rule_refs": {
+                        "type": "array",
+                        "description": "AGENTS.md policy references only. Must be [] when the finding is not an applicable AGENTS.md violation.",
+                        "items": RULE_REF_SCHEMA,
+                    },
                     "rationale": {"type": "string"},
                     "required_change": {"type": "string"},
                 },
@@ -211,6 +219,16 @@ def validate_result(
                     raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Policy violation finding {lid} must be blocking")
                 if path not in {ref["path"] for ref in finding["rule_refs"]}:
                     raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Finding {lid} does not reference violating policy {path}")
+
+        for lid, finding in findings_by_id.items():
+            if path in {ref["path"] for ref in finding["rule_refs"]}:
+                if policy["status"] != "VIOLATION" or lid not in listed:
+                    raise LoopReviewError(
+                        "SCHEMA_VALIDATION_FAILED",
+                        f"Finding {lid} cites {path} in rule_refs but that policy does not list the finding as a violation",
+                    )
+                if not finding["blocking"]:
+                    raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"AGENTS.md violation finding {lid} must be blocking")
     active = set(active_finding_ids or [])
     seen_adj: Set[str] = set()
     for i, a in enumerate(adjudications):

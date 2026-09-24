@@ -12,11 +12,11 @@ adapter = "opencode"
 executable = "opencode"
 model = "openrouter/x-ai/grok-4.7"
 reasoning = "high"
-timeout_seconds = 900
+timeout_seconds = 3600
 
 [reviewers.deepseek]
 adapter = "claude"
 executable = "claude"
 model = "deepseek-flash[1m]"
 reasoning = "max"
-timeout_seconds = 900
+timeout_seconds = 1800

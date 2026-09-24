@@ -61,7 +61,7 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaises(LoopReviewError):
             validate_result(obj, [], ["F001"])
 
-    def test_nonblocking_finding_may_reference_checked_policy(self):
+    def test_non_violation_finding_must_not_use_rule_refs(self):
         policy = "/repo/AGENTS.md"
         obj = {
             "schema_version": "1.0",
@@ -83,7 +83,8 @@ class HardeningTests(unittest.TestCase):
             "open_questions": [],
             "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
         }
-        validate_result(obj, [policy])
+        with self.assertRaises(LoopReviewError):
+            validate_result(obj, [policy])
 
     def test_policy_violation_must_link_to_blocking_finding(self):
         policy = "/repo/AGENTS.md"

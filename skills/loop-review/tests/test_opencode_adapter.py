@@ -1,11 +1,14 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from loop_review.adapters.opencode import OpenCodeAdapter
+from loop_review.util import LoopReviewError
 
 
 class OpenCodeParserTests(unittest.TestCase):
@@ -47,6 +50,27 @@ class OpenCodeParserTests(unittest.TestCase):
         self.assertEqual(cfg["permission"]["grep"], "allow")
         self.assertEqual(env["OPENCODE_DISABLE_EXTERNAL_SKILLS"], "1")
         self.assertEqual(env["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"], "1")
+
+    def test_timeout_persists_partial_output_and_error_artifacts(self):
+        error = LoopReviewError(
+            "TIMEOUT",
+            "timed out",
+            {"stdout": "partial-jsonl", "stderr": "partial-error", "timeout_seconds": 1},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            out = td / "out"
+            with patch("loop_review.adapters.opencode.run_cmd", side_effect=error):
+                with self.assertRaises(LoopReviewError):
+                    self.adapter.review("prompt", td, td / "run", out)
+
+            self.assertEqual((out / "raw.stdout").read_text(), "partial-jsonl")
+            self.assertEqual((out / "raw.stderr").read_text(), "partial-error")
+            meta = json.loads((out / "meta.json").read_text())
+            err = json.loads((out / "error.json").read_text())
+            self.assertEqual(meta["status"], "TIMEOUT")
+            self.assertEqual(meta["timeout_seconds"], 1)
+            self.assertEqual(err["code"], "TIMEOUT")
 
 
 if __name__ == "__main__":

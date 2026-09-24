@@ -11,6 +11,7 @@ Mandatory rules:
 5. A blocking finding requires concrete evidence. Prefer exact file and line references where possible.
 6. Continue looking for missed issues while adjudicating existing findings.
 7. Report only actionable defects or material design risks. Do not promote style preferences into blockers.
-8. Return the required JSON object only.
+8. Reserve `rule_refs` exclusively for binding rules from the applicable `AGENTS.md` files listed in the prompt. Put ADRs, design documents, source files, tests, requirements, and other project documents in `evidence`, never in `rule_refs`. If a finding is not an applicable `AGENTS.md` violation, return `rule_refs: []`.
+9. Return the required JSON object only.
 
 For an `AGENTS.md` violation, create a blocking finding with a `rule_refs` entry and mark the corresponding policy as `VIOLATION`.

@@ -125,15 +125,19 @@ adapter = "opencode"
 executable = "opencode"
 model = "openrouter/x-ai/grok-4.7"
 reasoning = "high"
-timeout_seconds = 900
+timeout_seconds = 3600
 
 [reviewers.deepseek]
 adapter = "claude"
 executable = "claude"
 model = "deepseek-flash[1m]"
 reasoning = "max"
-timeout_seconds = 900
+timeout_seconds = 1800
 ```
+
+The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Grok receives a larger ceiling because repository inspection can legitimately run for many tool steps even at `high` reasoning.
+
+If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
 
 Use CLI/provider-native authentication. Do not put API keys or access tokens in this configuration file.
 

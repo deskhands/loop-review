@@ -89,6 +89,9 @@ It must conform to this JSON Schema:
 {schema}
 
 policies_checked must include every applicable AGENTS.md path listed above.
+rule_refs is reserved exclusively for binding rules from the applicable AGENTS.md files listed above.
+Do NOT put ADRs, design documents, source files, tests, requirements, or other project documents in rule_refs; cite those in evidence instead.
+If a finding is not an applicable AGENTS.md violation, rule_refs MUST be [].
 For an AGENTS.md violation, create a blocking finding with rule_refs and mark that policy VIOLATION.
 Evidence must be concise and verifiable. Do not include hidden chain-of-thought; rationale should state only the review justification needed to support the finding.
 """
