@@ -6,6 +6,8 @@ Flow:
 
 Any infrastructure/protocol failure goes to `FAILED`.
 
+For long outer-agent sessions, `run --detach` starts the same controller in a new local process session and returns a durable `job_id`. `status --job <job_id>` reads that detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; V1 does not automatically restart or resume it.
+
 Cross-check ledger updates are transactional and order-independent. The controller assigns stable IDs to new findings first, resolves `REFINE`/`DUPLICATE_OF` relations to canonical targets (flattening duplicate/superseded chains), validates the full relation graph for unknown targets and cycles, then commits the batch atomically. A failed relation batch leaves the prior ledger unchanged.
 
 `state/state.json` intentionally records coarser durable checkpoints (`INIT`, `PREPARED`, `PREFLIGHT`, `DISCOVERY_PARALLEL`, `CROSS_CHECK`, then the final state). The flow above describes the internal logical phases; the persisted checkpoint names are not a one-to-one trace of every helper step.

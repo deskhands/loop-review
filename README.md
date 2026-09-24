@@ -179,6 +179,22 @@ Supported modes:
 - `code`
 - `review`
 
+For outer agents that may disconnect or time out, start the existing controller detached instead of keeping the shell call open:
+
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" run \
+  --invocation /path/to/invocation.json \
+  --detach
+```
+
+The command returns immediately with a durable `job_id`. Query that same review later without rerunning models:
+
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
+```
+
+If the exact job id was lost, `status` without `--job` resolves the most recent detached job. Detached execution deliberately uses no daemon, database, queue, or server: it is the same controller process started in a new OS session, with a small metadata/stdout/stderr record under `<run_root>/_jobs/`. If that local process itself disappears before producing a terminal result, status is `ORPHANED`; automatic crash-resume is intentionally out of scope.
+
 The controller runs blind discovery first, then bounded serial cross-checks. The final controller state can be:
 
 - `FROZEN_PASS`

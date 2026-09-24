@@ -13,14 +13,20 @@ Run the deterministic controller; do not reproduce its orchestration in conversa
 2. Preserve the user's request and supplied target text verbatim. Do not summarize or rewrite them.
 3. Determine the repository root. V1 requires the supplied repository to be a Git repository for every mode so repository state can be fingerprinted and audited.
 4. Build an invocation JSON matching [references/invocation.md](references/invocation.md).
-5. Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`, then run:
+5. Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`, then start the review detached so it survives an outer-agent/tool-session disconnect:
    ```bash
-   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json>
+   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --detach
    ```
-6. Read the returned `status_path` and `review_path`.
-7. Perform the required **Outer Agent Acceptance** described in [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md). The controller's `FROZEN_*` status is a frozen review conclusion, not automatic acceptance by the outer agent.
-8. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
-9. If the controller fails, report its failure code and run directory. Do not bypass a failed reviewer or silently fall back to one model.
+   Preserve the returned `job_id`. Do not start a second review for the same request merely because the outer session was interrupted.
+6. Query the detached job:
+   ```bash
+   python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
+   ```
+   If the exact job id is unavailable, `status` without `--job` resolves the most recent detached job. If status is `RUNNING`, leave the local review running; a later outer-agent turn should query the same job instead of rerunning reviewers.
+7. When the job reaches a controller terminal state, read the returned `status_path` and `review_path`.
+8. Perform the required **Outer Agent Acceptance** described in [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md). The controller's `FROZEN_*` status is a frozen review conclusion, not automatic acceptance by the outer agent.
+9. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
+10. If the controller fails, report its failure code and run directory. If a detached job is `ORPHANED`, report that the local controller process ended without a terminal result; do not silently restart it or bypass a reviewer.
 
 The controller owns prompt construction, reviewer ordering, timeouts, state transitions, evidence retention, and freeze decisions. Grok/DeepSeek workers must not be called separately as a substitute for the controller. The outer agent alone owns acceptance of the frozen review in the context of the original user request.
 
@@ -59,6 +65,16 @@ python3 "$SKILL_ROOT/scripts/loop_review.py" doctor
 Prepare a run without model calls:
 ```bash
 python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --dry-run
+```
+
+Start a durable detached review:
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --detach
+```
+
+Check a detached review:
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
 ```
 
 Run tests:
