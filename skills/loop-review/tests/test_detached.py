@@ -7,6 +7,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI_PATH = ROOT / "scripts" / "loop_review.py"
@@ -173,6 +175,136 @@ class DetachedCliTests(unittest.TestCase):
             self.assertIsNotNone(final)
             self.assertEqual(final["status"], "FAILED")
             self.assertEqual(final["failure_code"], "FAILED_PREFLIGHT")
+
+
+    def test_resume_is_detached_by_default_and_reuses_job_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg = {"paths": {"run_root": str(td / "runs")}}
+            jobs = CLI._jobs_dir(cfg)
+            run_dir = td / "runs" / "failed-run"
+            run_dir.mkdir(parents=True)
+            job_id = "1234abcd"
+            stdout_path = jobs / f"{job_id}.stdout"
+            stderr_path = jobs / f"{job_id}.stderr"
+            stdout_path.write_text("")
+            stderr_path.write_text(json.dumps({
+                "status": "FAILED",
+                "failure_code": "TIMEOUT",
+                "message": "failed",
+                "details": {"run_dir": str(run_dir)},
+            }))
+            CLI.atomic_json(jobs / f"{job_id}.json", {
+                "job_id": job_id,
+                "pid": 99999999,
+                "started_at": "2026-09-24T00:00:00+00:00",
+                "invocation": str(td / "invocation.json"),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+            })
+            args = SimpleNamespace(
+                job=job_id,
+                config=str(td / "config.toml"),
+            )
+            proc = Mock()
+            proc.pid = 4242
+            with patch.object(CLI.subprocess, "Popen", return_value=proc) as popen:
+                result = CLI._start_resume_detached(args, cfg)
+
+            self.assertEqual(result["status"], "RESUME_STARTED")
+            self.assertEqual(result["job_id"], job_id)
+            self.assertEqual(result["run_dir"], str(run_dir.resolve()))
+            record = json.loads((jobs / f"{job_id}.json").read_text())
+            self.assertEqual(record["pid"], 4242)
+            self.assertEqual(record["resume_count"], 1)
+            self.assertEqual(record["run_dir"], str(run_dir.resolve()))
+            self.assertEqual(stdout_path.read_text(), "")
+            self.assertIn('"status": "FAILED"', stderr_path.read_text())
+            self.assertTrue(Path(record["stdout_path"]).name.endswith(".resume1.stdout"))
+            self.assertTrue(Path(record["stderr_path"]).name.endswith(".resume1.stderr"))
+            self.assertEqual(Path(record["stdout_path"]).read_text(), "")
+            self.assertEqual(Path(record["stderr_path"]).read_text(), "")
+            argv = popen.call_args.args[0]
+            self.assertIn("resume", argv)
+            self.assertIn("--foreground", argv)
+            self.assertIn("--run-dir", argv)
+            self.assertIn(str(run_dir.resolve()), argv)
+
+
+    def test_resume_rejects_running_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg = {"paths": {"run_root": str(td / "runs")}}
+            jobs = CLI._jobs_dir(cfg)
+            run_dir = td / "runs" / "failed-run"
+            run_dir.mkdir(parents=True)
+            job_id = "beadfeed"
+            stdout_path = jobs / f"{job_id}.resume1.stdout"
+            stderr_path = jobs / f"{job_id}.resume1.stderr"
+            stdout_path.write_text("")
+            stderr_path.write_text("")
+            CLI.atomic_json(jobs / f"{job_id}.json", {
+                "job_id": job_id,
+                "pid": os.getpid(),
+                "started_at": "2026-09-24T00:00:00+00:00",
+                "invocation": str(td / "invocation.json"),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "run_dir": str(run_dir),
+                "resume_count": 1,
+            })
+            args = SimpleNamespace(job=job_id, config=str(td / "config.toml"))
+            with self.assertRaises(CLI.LoopReviewError) as caught:
+                CLI._start_resume_detached(args, cfg)
+            self.assertEqual(caught.exception.code, "RESUME_NOT_SUPPORTED")
+
+
+    def test_internal_foreground_resume_uses_verified_run_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg = {"paths": {"run_root": str(td / "runs")}}
+            jobs = CLI._jobs_dir(cfg)
+            run_dir = td / "runs" / "failed-run"
+            run_dir.mkdir(parents=True)
+            job_id = "faceb00c"
+            stdout_path = jobs / f"{job_id}.resume1.stdout"
+            stderr_path = jobs / f"{job_id}.resume1.stderr"
+            stdout_path.write_text("")
+            stderr_path.write_text("")
+            CLI.atomic_json(jobs / f"{job_id}.json", {
+                "job_id": job_id,
+                "pid": os.getpid(),
+                "started_at": "2026-09-24T00:00:00+00:00",
+                "invocation": str(td / "invocation.json"),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "run_dir": str(run_dir),
+                "resume_count": 1,
+            })
+            controller = Mock()
+            controller.resume.return_value = {
+                "status": "FROZEN_PASS",
+                "run_dir": str(run_dir),
+            }
+            argv = [
+                str(CLI_PATH),
+                "--config",
+                str(td / "config.toml"),
+                "resume",
+                "--job",
+                job_id,
+                "--foreground",
+                "--run-dir",
+                str(run_dir),
+            ]
+            with patch.object(CLI, "load_config", return_value=cfg), \
+                 patch.object(CLI, "LoopReviewController", return_value=controller), \
+                 patch.object(sys, "argv", argv), \
+                 patch("builtins.print"):
+                rc = CLI.main()
+
+            self.assertEqual(rc, 0)
+            controller.resume.assert_called_once_with(run_dir.resolve())
 
 
 if __name__ == "__main__":

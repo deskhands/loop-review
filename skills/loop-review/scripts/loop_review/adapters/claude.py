@@ -60,6 +60,9 @@ class ClaudeAdapter(ReviewerAdapter):
                 pass
         raise LoopReviewError("INVALID_JSON", "Claude response did not contain structured JSON", {"raw": outer})
 
+    def parse_saved_output(self, stdout: str) -> Dict[str, Any]:
+        return self._extract(stdout)
+
     def healthcheck(self, cwd: Path) -> Dict[str, Any]:
         argv = self._base() + [
             "--json-schema", json.dumps(_HEALTH_SCHEMA, separators=(",", ":")),

@@ -6,7 +6,15 @@ Flow:
 
 Any infrastructure/protocol failure goes to `FAILED`.
 
-A real `run` starts the same controller in a new local process session by default and returns a durable `job_id`; `--foreground` is reserved for explicit debugging/manual synchronous execution, while `--dry-run` stays synchronous. `status --job <job_id>` reads the detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; V1 does not automatically restart or resume it.
+A real `run` starts the same controller in a new local process session by default and returns a durable `job_id`; `--foreground` is reserved for explicit debugging/manual synchronous execution, while `--dry-run` stays synchronous. `status --job <job_id>` reads the detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; automatic recovery from an unknown half-executed process is intentionally not attempted.
+
+A `FAILED` job can re-enter the same state machine with `resume --job <job_id>`. Resume does not trust the last persisted ledger as its starting point. It reloads the original invocation and fingerprint, verifies the repository/target/AGENTS.md and reviewer adapter/model/reasoning are unchanged, then deterministically replays round checkpoints in the normal reviewer order:
+- a currently valid `result.json` is reused with no model call;
+- if a completed reviewer process exited 0 and its saved `raw.stdout` now parses and validates, the result is recovered with no model call;
+- otherwise only that missing/failed reviewer slot is called again;
+- discovery remains blind and cross-check uses the same cycle ordering as a fresh run.
+
+Before a resume, the previous terminal state is copied under `run_dir/resume/<timestamp>/`. Before an actual reviewer retry overwrites a failed slot, that slot's prior artifacts are copied under its `attempts/<timestamp>/`. `review_calls` remains the cumulative count of actual reviewer model attempts, so repeated recovery attempts can make it exceed the original logical `max_model_calls` budget; the bounded cycle topology itself does not change.
 
 Cross-check ledger updates are transactional and order-independent. The controller assigns stable IDs to new findings first, resolves `REFINE`/`DUPLICATE_OF` relations to canonical targets (flattening duplicate/superseded chains), validates the full relation graph for unknown targets and cycles, then commits the batch atomically. A failed relation batch leaves the prior ledger unchanged.
 

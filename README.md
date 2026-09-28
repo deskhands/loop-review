@@ -194,9 +194,19 @@ python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
 
 If status is `RUNNING`, normally return control to the outer conversation and check the same `job_id` on a later turn. Do not continuously poll with short sleeps. Only when the outer agent judges that waiting in the current turn is useful should it wait about 120 seconds before one additional status check.
 
+If status is `FAILED`, resume the same job instead of starting a fresh review:
+
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
+```
+
+Resume is detached by default and keeps the same `job_id`. It replays the normal review state machine from durable artifacts: an already validated `result.json` is reused, an exit-0 `raw.stdout` is recovered without another model call when it now parses and validates, and only a reviewer slot with no reusable checkpoint is called again. This means a failure after several expensive calls does not throw those successful calls away.
+
+Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if the reviewer adapter, model, or reasoning configuration no longer matches the original run. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, and actual rerun calls.
+
 If the exact job id was lost, `status` without `--job` resolves the most recent detached job. `--dry-run` remains synchronous, and `--foreground` is available only for explicit debugging/manual synchronous execution. The older `--detach` flag remains accepted as a compatibility alias for the default behavior.
 
-Detached execution deliberately uses no daemon, database, queue, or server: it is the same controller process started in a new OS session, with a small metadata/stdout/stderr record under `<run_root>/_jobs/`. If that local process itself disappears before producing a terminal result, status is `ORPHANED`; automatic crash-resume is intentionally out of scope.
+Detached execution deliberately uses no daemon, database, queue, or server: it is the same controller process started in a new OS session, with a small metadata/stdout/stderr record under `<run_root>/_jobs/`. A known `FAILED` run is resumable as described above. If the detached process disappears while its state is still unknown, status is `ORPHANED`; automatic recovery of that potentially half-executed process is intentionally out of scope.
 
 The controller runs blind discovery first, then bounded serial cross-checks. The final controller state can be:
 

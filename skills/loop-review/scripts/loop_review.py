@@ -45,6 +45,15 @@ def parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="Read a detached review job status")
     status.add_argument("--job", help="Detached job id; omit to use the most recent job")
+
+    resume = sub.add_parser("resume", help="Resume a failed detached review from durable checkpoints")
+    resume.add_argument("--job", required=True, help="Failed detached job id to resume in place")
+    resume.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Resume synchronously in the calling shell (debug/manual use)",
+    )
+    resume.add_argument("--run-dir", help=argparse.SUPPRESS)
     return p
 
 
@@ -194,12 +203,113 @@ def _detached_status(cfg: Dict[str, Any], job_id: Optional[str]) -> Dict[str, An
     }
 
 
+
+def _failed_job_run_dir(cfg: Dict[str, Any], job_id: str) -> Path:
+    job_path = _job_path(cfg, job_id)
+    if not job_path.is_file():
+        raise LoopReviewError("JOB_NOT_FOUND", f"Detached job not found: {job_id}")
+    record = json.loads(job_path.read_text(encoding="utf-8"))
+    failed = _detached_status(cfg, job_id)
+    if failed.get("status") != "FAILED":
+        raise LoopReviewError(
+            "RESUME_NOT_SUPPORTED",
+            f"Job must be FAILED before resume; current status is {failed.get('status')}",
+        )
+    raw = failed.get("run_dir") or (failed.get("details") or {}).get("run_dir") or record.get("run_dir")
+    if not isinstance(raw, str) or not raw:
+        raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Failed job does not identify its run directory")
+    run_dir = Path(raw).resolve()
+    record["run_dir"] = str(run_dir)
+    atomic_json(job_path, record)
+    return run_dir
+
+
+def _start_resume_detached(args: argparse.Namespace, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    job_path = _job_path(cfg, args.job)
+    if not job_path.is_file():
+        raise LoopReviewError("JOB_NOT_FOUND", f"Detached job not found: {args.job}")
+
+    run_dir = _failed_job_run_dir(cfg, args.job)
+    run_root = Path(cfg["paths"]["run_root"]).resolve()
+    if run_dir.parent != run_root:
+        raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Failed run directory is outside the configured run root")
+
+    record = json.loads(job_path.read_text(encoding="utf-8"))
+    resume_count = int(record.get("resume_count", 0)) + 1
+    jobs_dir = _jobs_dir(cfg)
+    stdout_path = jobs_dir / f"{args.job}.resume{resume_count}.stdout"
+    stderr_path = jobs_dir / f"{args.job}.resume{resume_count}.stderr"
+    config_path = expand_path(args.config)
+    argv = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--config",
+        str(config_path),
+        "resume",
+        "--job",
+        args.job,
+        "--foreground",
+        "--run-dir",
+        str(run_dir),
+    ]
+
+    stdout_f = stdout_path.open("wb", buffering=0)
+    stderr_f = stderr_path.open("wb", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_f,
+            stderr=stderr_f,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        stdout_f.close()
+        stderr_f.close()
+
+    record.update({
+        "pid": proc.pid,
+        "run_dir": str(run_dir),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "resumed_at": datetime.now().astimezone().isoformat(),
+        "resume_count": resume_count,
+    })
+    atomic_json(job_path, record)
+    return {
+        "status": "RESUME_STARTED",
+        "job_id": args.job,
+        "pid": proc.pid,
+        "run_dir": str(run_dir),
+        "job_path": str(job_path),
+        "status_command": (
+            f'python3 "{Path(__file__).resolve()}" --config "{config_path}" '
+            f'status --job {args.job}'
+        ),
+    }
+
 def main() -> int:
     args = parser().parse_args()
     try:
         cfg = load_config(expand_path(args.config))
         if args.command == "status":
             result = _detached_status(cfg, args.job)
+        elif args.command == "resume" and not args.foreground:
+            result = _start_resume_detached(args, cfg)
+        elif args.command == "resume":
+            run_dir = Path(args.run_dir).resolve() if args.run_dir else _failed_job_run_dir(cfg, args.job)
+            run_root = Path(cfg["paths"]["run_root"]).resolve()
+            if run_dir.parent != run_root:
+                raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Failed run directory is outside the configured run root")
+            if args.run_dir:
+                record = json.loads(_job_path(cfg, args.job).read_text(encoding="utf-8"))
+                if Path(record.get("run_dir", "")).resolve() != run_dir:
+                    raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Internal resume run directory does not match the job record")
+            controller = LoopReviewController(cfg, SCRIPT_DIR.parent)
+            result = controller.resume(run_dir)
+            result = dict(result)
+            result["job_id"] = args.job
         elif args.command == "run" and not args.dry_run and not args.foreground:
             result = _start_detached(args, cfg)
         else:

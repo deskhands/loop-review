@@ -117,6 +117,9 @@ class OpenCodeAdapter(ReviewerAdapter):
             {"last_text": texts[-1][-4000:]},
         )
 
+    def parse_saved_output(self, stdout: str) -> Dict[str, Any]:
+        return self._extract_json(stdout)
+
     def _argv(self, cwd: Path, prompt: str) -> List[str]:
         return [
             self.config["executable"], "run",

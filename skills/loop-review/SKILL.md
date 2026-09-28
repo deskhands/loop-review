@@ -24,9 +24,14 @@ Run the deterministic controller; do not reproduce its orchestration in conversa
    ```
    If the exact job id is unavailable, `status` without `--job` resolves the most recent detached job. If status is `RUNNING`, leave the local review running and normally return control to the outer conversation; a later outer-agent turn should query the same job instead of rerunning reviewers. Do not continuously poll with short sleeps. Only if the outer agent judges that waiting in the current turn is useful, wait about 120 seconds before one additional status check.
 7. When the job reaches a controller terminal state, read the returned `status_path` and `review_path`.
-8. Perform the required **Outer Agent Acceptance** described in [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md). The controller's `FROZEN_*` status is a frozen review conclusion, not automatic acceptance by the outer agent.
-9. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
-10. If the controller fails, report its failure code and run directory. If a detached job is `ORPHANED`, report that the local controller process ended without a terminal result; do not silently restart it or bypass a reviewer.
+8. If status is `FAILED`, do not start a fresh review for the same request. When the user wants to continue/retry, resume the same job:
+   ```bash
+   python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
+   ```
+   Resume is detached by default and keeps the same `job_id`. It deterministically replays validated checkpoints, reuses successful reviewer results, tries to recover a completed exit-0 raw response with the current parser/schema, and calls a model only for a reviewer slot that has no reusable result. Then query `status --job <job_id>` as usual. If resume reports `FAILED_INPUT_CHANGED`, `RESUME_CONFIG_CHANGED`, or `RESUME_CHECKPOINT_INVALID`, report that error instead of forcing a restart.
+9. For a non-failed frozen/unresolved result, perform the required **Outer Agent Acceptance** described in [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md). The controller's `FROZEN_*` status is a frozen review conclusion, not automatic acceptance by the outer agent.
+10. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
+11. If a detached job is `ORPHANED`, report that the local controller process ended without a terminal result; do not silently restart it or bypass a reviewer.
 
 The controller owns prompt construction, reviewer ordering, timeouts, state transitions, evidence retention, and freeze decisions. Reviewer workers must not be called separately as a substitute for the controller. The outer agent alone owns acceptance of the frozen review in the context of the original user request.
 
@@ -46,6 +51,8 @@ The controller owns prompt construction, reviewer ordering, timeouts, state tran
 - Let the controller freeze only the review conclusion. `FROZEN_CHANGES_REQUIRED` is a valid successful review outcome.
 - Require outer-agent acceptance after every non-failed frozen/unresolved result. Do not treat model convergence as authority over the user's original goal.
 - Keep all run artifacts under the configured run root for audit.
+- On retry, resume the failed job in place instead of creating a new run. Never rerun a reviewer slot that already has a valid checkpoint merely to simplify recovery.
+- Resume only when the original input fingerprint and reviewer adapter/model/reasoning still match. Do not mix checkpoints across changed inputs or model configurations.
 - Do not busy-wait on detached jobs. Prefer a later outer-agent turn over repeated polling; if same-turn waiting is useful, use roughly 120 seconds between status checks rather than short sleep loops.
 
 For schemas and semantics, consult:
@@ -81,6 +88,11 @@ python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> 
 Check a detached review:
 ```bash
 python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
+```
+
+Resume a failed review in place (detached by default):
+```bash
+python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
 ```
 
 Run tests:
