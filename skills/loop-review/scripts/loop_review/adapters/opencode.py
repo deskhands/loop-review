@@ -57,6 +57,37 @@ class OpenCodeAdapter(ReviewerAdapter):
             raise LoopReviewError("INVALID_JSON", "OpenCode emitted no text event", {"stdout": stdout[-4000:]})
         return last_text.strip()
 
+    def _parse_text_json_object(self, text: str) -> Dict[str, Any]:
+        candidate = text.strip()
+        if candidate.startswith(("```", "~~~")):
+            fence = candidate[:3]
+            lines = candidate.splitlines()[1:]
+            if lines and lines[-1].strip() == fence:
+                lines = lines[:-1]
+            candidate = "\n".join(lines).strip()
+
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError as whole_error:
+            # Some models prepend short narration before the final JSON object
+            # in the same text event. Accept only a complete object that consumes
+            # the rest of the event; do not repair malformed JSON.
+            decoder = json.JSONDecoder()
+            for start, ch in enumerate(candidate):
+                if ch != "{":
+                    continue
+                try:
+                    obj, end = decoder.raw_decode(candidate[start:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and not candidate[start + end:].strip():
+                    return obj
+            raise whole_error
+
+        if not isinstance(obj, dict):
+            raise json.JSONDecodeError("top-level JSON value is not an object", candidate, 0)
+        return obj
+
     def _extract_json(self, stdout: str) -> Dict[str, Any]:
         texts: List[str] = []
         for line in stdout.splitlines():
@@ -75,20 +106,11 @@ class OpenCodeAdapter(ReviewerAdapter):
 
         last_error = None
         for text in reversed(texts):
-            candidate = text
-            if candidate.startswith(("```", "~~~")):
-                fence = candidate[:3]
-                lines = candidate.splitlines()[1:]
-                if lines and lines[-1].strip() == fence:
-                    lines = lines[:-1]
-                candidate = "\n".join(lines).strip()
             try:
-                obj = json.loads(candidate)
+                return self._parse_text_json_object(text)
             except json.JSONDecodeError as e:
                 last_error = e
                 continue
-            if isinstance(obj, dict):
-                return obj
         raise LoopReviewError(
             "INVALID_JSON",
             f"OpenCode emitted no parseable JSON object: {last_error}",

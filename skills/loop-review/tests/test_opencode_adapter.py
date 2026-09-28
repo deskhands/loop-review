@@ -41,6 +41,35 @@ class OpenCodeParserTests(unittest.TestCase):
         stdout = "\n".join(json.dumps(x) for x in events)
         self.assertEqual(self.adapter._extract_json(stdout), {"ok": True})
 
+    def test_prefixed_narration_before_json_in_same_event_is_accepted(self):
+        event = {
+            "type": "text",
+            "part": {
+                "text": "All evidence verified. Returning the adjudication.\n\n{\"ok\":true}"
+            },
+        }
+        self.assertEqual(self.adapter._extract_json(json.dumps(event)), {"ok": True})
+
+    def test_braces_in_prefix_do_not_override_terminal_json_object(self):
+        event = {
+            "type": "text",
+            "part": {
+                "text": "Checked example {not-json}. Final result follows:\n{\"ok\":true}"
+            },
+        }
+        self.assertEqual(self.adapter._extract_json(json.dumps(event)), {"ok": True})
+
+    def test_malformed_terminal_json_is_not_repaired(self):
+        event = {
+            "type": "text",
+            "part": {
+                "text": "Returning result:\n{\"ok\":true"
+            },
+        }
+        with self.assertRaises(LoopReviewError) as caught:
+            self.adapter._extract_json(json.dumps(event))
+        self.assertEqual(caught.exception.code, "INVALID_JSON")
+
     def test_read_only_permission_contract(self):
         env = self.adapter._env()
         cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
