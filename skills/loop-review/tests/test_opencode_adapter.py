@@ -77,6 +77,10 @@ class OpenCodeParserTests(unittest.TestCase):
         self.assertEqual(cfg["permission"]["read"], "allow")
         self.assertEqual(cfg["permission"]["glob"], "allow")
         self.assertEqual(cfg["permission"]["grep"], "allow")
+        self.assertEqual(cfg["agent"]["build"]["steps"], 96)
+        argv = self.adapter._argv(Path("/tmp"), "prompt")
+        self.assertIn("--agent", argv)
+        self.assertEqual(argv[argv.index("--agent") + 1], "build")
         self.assertEqual(env["OPENCODE_DISABLE_EXTERNAL_SKILLS"], "1")
         self.assertEqual(env["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"], "1")
 

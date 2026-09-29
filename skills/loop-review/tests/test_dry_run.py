@@ -53,6 +53,7 @@ class DryRunTests(unittest.TestCase):
             self.assertIn("Review verbatim.", prompt)
             self.assertIn("rule_refs is reserved exclusively", prompt)
             self.assertIn("ADRs, design documents, source files, tests, requirements", prompt)
+            self.assertIn("Do not repeat an identical read, grep, or glob call", prompt)
 
 
 if __name__ == "__main__":

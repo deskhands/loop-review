@@ -12,6 +12,7 @@ adapter = "opencode"
 executable = "opencode"
 model = "openrouter/z-ai/glm-5.3-flash"
 reasoning = "high"
+steps = 96
 timeout_seconds = 3600
 
 [reviewers.deepseek]

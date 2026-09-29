@@ -26,7 +26,22 @@ class HardeningTests(unittest.TestCase):
             )
             cfg = load_config(p)
             self.assertEqual(cfg["reviewers"]["grok"]["executable"], "opencode")
+            self.assertEqual(cfg["reviewers"]["grok"]["steps"], 96)
             self.assertEqual(cfg["reviewers"]["deepseek"]["executable"], "claude")
+
+    def test_config_rejects_nonpositive_opencode_steps(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "config.toml"
+            p.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "opencode"\nmodel = "x"\nreasoning = "high"\nsteps = 0\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            with self.assertRaises(LoopReviewError) as caught:
+                load_config(p)
+            self.assertEqual(caught.exception.code, "CONFIG_ERROR")
 
     def test_config_rejects_adapter_mismatch(self):
         with tempfile.TemporaryDirectory() as td:

@@ -10,21 +10,27 @@ from .base import ReviewerAdapter
 from ..util import LoopReviewError, atomic_json, run_cmd, write_text
 
 
-_READ_ONLY_CONFIG = {
-    "permission": {
-        "*": "deny",
-        "read": "allow",
-        "glob": "allow",
-        "grep": "allow",
-        "external_directory": "allow",
-    }
+_READ_ONLY_PERMISSION = {
+    "*": "deny",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "external_directory": "allow",
 }
 
 
 class OpenCodeAdapter(ReviewerAdapter):
     def _env(self) -> Dict[str, str]:
         env = os.environ.copy()
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(_READ_ONLY_CONFIG, separators=(",", ":"))
+        config = {
+            "permission": _READ_ONLY_PERMISSION,
+            "agent": {
+                "build": {
+                    "steps": int(self.config.get("steps", 96)),
+                }
+            },
+        }
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, separators=(",", ":"))
         env["OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"] = "1"
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
         env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
@@ -125,6 +131,7 @@ class OpenCodeAdapter(ReviewerAdapter):
             self.config["executable"], "run",
             "--pure",
             "--format", "json",
+            "--agent", "build",
             "--model", self.config["model"],
             "--variant", self.config["reasoning"],
             "--dir", str(cwd),
@@ -143,7 +150,13 @@ class OpenCodeAdapter(ReviewerAdapter):
         obj = self._extract_json(cp.stdout)
         if obj != {"ok": True}:
             raise LoopReviewError("MODEL_HEALTHCHECK_FAILED", "OpenCode healthcheck returned unexpected data", {"result": obj})
-        return {"ok": True, "version": self.version(), "model": self.config["model"], "reasoning": self.config["reasoning"]}
+        return {
+            "ok": True,
+            "version": self.version(),
+            "model": self.config["model"],
+            "reasoning": self.config["reasoning"],
+            "steps": int(self.config.get("steps", 96)),
+        }
 
     def review(
         self,
@@ -174,6 +187,7 @@ class OpenCodeAdapter(ReviewerAdapter):
                     "exit_code": None,
                     "model": self.config["model"],
                     "reasoning": self.config["reasoning"],
+                    "steps": int(self.config.get("steps", 96)),
                     "timeout_seconds": timeout_seconds,
                 }
                 atomic_json(out_dir / "meta.json", meta)
@@ -211,6 +225,7 @@ class OpenCodeAdapter(ReviewerAdapter):
             "exit_code": cp.returncode,
             "model": self.config["model"],
             "reasoning": self.config["reasoning"],
+            "steps": int(self.config.get("steps", 96)),
             "timeout_seconds": timeout_seconds,
         }
         if cp.returncode != 0:

@@ -959,6 +959,7 @@ class LoopReviewController:
                         "adapter": self.config["reviewers"]["grok"]["adapter"],
                         "model": self.config["reviewers"]["grok"]["model"],
                         "reasoning": self.config["reviewers"]["grok"]["reasoning"],
+                        "steps": int(self.config["reviewers"]["grok"].get("steps", 96)),
                         "timeout_seconds": int(self.config["reviewers"]["grok"]["timeout_seconds"]),
                     },
                     "reviewer-b": {

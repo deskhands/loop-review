@@ -83,6 +83,10 @@ Full prior round reports are available for optional drill-down:
 [CURRENT TASK]
 {task}
 
+[TOOL DISCIPLINE]
+Do not repeat an identical read, grep, or glob call when a prior result already answered the same question.
+If additional tool calls are not producing new evidence, stop inspecting and return the final JSON object.
+
 [OUTPUT CONTRACT]
 Return exactly one JSON object and no Markdown fences.
 It must conform to this JSON Schema:
