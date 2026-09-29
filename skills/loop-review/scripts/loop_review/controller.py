@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .adapters import ClaudeAdapter
+from .adapters import ClaudeAdapter, PiAdapter
 from .agents_rules import discover_rules
 from .git_state import (
     ensure_repo,
@@ -48,7 +48,7 @@ class LoopReviewController:
         self.config = config
         self.skill_root = skill_root.resolve()
         self.reviewers = {
-            "glm": ClaudeAdapter("glm", config["reviewers"]["glm"]),
+            "glm": PiAdapter("glm", config["reviewers"]["glm"]),
             "deepseek": ClaudeAdapter("deepseek", config["reviewers"]["deepseek"]),
         }
         self.aliases = {"glm": "Reviewer-A", "deepseek": "Reviewer-B"}
@@ -545,8 +545,8 @@ class LoopReviewController:
                 continue
             if (
                 alias == "reviewer-a"
-                and old_adapter == "opencode"
-                and current_adapter == "claude"
+                and old_adapter in ("opencode", "claude")
+                and current_adapter == "pi"
             ):
                 migrations.append({
                     "reviewer": alias,

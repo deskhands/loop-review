@@ -95,7 +95,7 @@ class DetachedCliTests(unittest.TestCase):
             'version = 1\n'
             '[paths]\nrun_root = "' + str(run_root) + '"\n'
             '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-            '[reviewers.glm]\nadapter = "claude"\nexecutable = "' + glm_executable + '"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+            '[reviewers.glm]\nadapter = "pi"\nexecutable = "' + glm_executable + '"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
             '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "' + deepseek_executable + '"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
         )
         return cfg

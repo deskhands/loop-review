@@ -52,7 +52,7 @@ The controller owns prompt construction, reviewer ordering, timeouts, state tran
 - Require outer-agent acceptance after every non-failed frozen/unresolved result. Do not treat model convergence as authority over the user's original goal.
 - Keep all run artifacts under the configured run root for audit.
 - On retry, resume the failed job in place instead of creating a new run. Never rerun a reviewer slot that already has a valid checkpoint merely to simplify recovery.
-- Resume only when the original input fingerprint and reviewer model/reasoning still match. Adapter changes fail closed except for the audited legacy Reviewer-A OpenCode-to-Claude migration of the same canonical GLM model; record that migration in resume metadata. Do not mix checkpoints across changed inputs or model configurations.
+- Resume only when the original input fingerprint and reviewer model/reasoning still match. Adapter changes fail closed except for the audited legacy Reviewer-A OpenCode/Claude-to-Pi migration of the same canonical GLM model; record that migration in resume metadata. Do not mix checkpoints across changed inputs or model configurations.
 - Do not busy-wait on detached jobs. Prefer a later outer-agent turn over repeated polling; if same-turn waiting is useful, use roughly 120 seconds between status checks rather than short sleep loops.
 
 For schemas and semantics, consult:

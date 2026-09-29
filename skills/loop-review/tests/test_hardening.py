@@ -21,11 +21,11 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "claude-glm"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "pi"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             cfg = load_config(p)
-            self.assertEqual(cfg["reviewers"]["glm"]["executable"], "claude-glm")
+            self.assertEqual(cfg["reviewers"]["glm"]["executable"], "pi")
             self.assertEqual(cfg["reviewers"]["deepseek"]["executable"], "claude")
 
     def test_config_rejects_adapter_mismatch(self):
@@ -138,7 +138,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -164,7 +164,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(repo / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -188,7 +188,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -217,7 +217,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "z-ai/glm-5.3-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "z-ai/glm-5.3-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -239,7 +239,7 @@ class HardeningTests(unittest.TestCase):
             self.assertEqual(migrations, [{
                 "reviewer": "reviewer-a",
                 "from_adapter": "opencode",
-                "to_adapter": "claude",
+                "to_adapter": "pi",
                 "model": "z-ai/glm-5.3-flash",
             }])
 
@@ -251,7 +251,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])

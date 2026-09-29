@@ -30,7 +30,7 @@ class DryRunTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(Path(td) / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             cfg = load_config(cfg_path)
