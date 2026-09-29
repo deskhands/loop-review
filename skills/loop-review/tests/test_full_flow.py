@@ -136,6 +136,107 @@ class RecoverableInvalidAdapter(FakeAdapter):
         raise LoopReviewError("INVALID_JSON", "simulated parser failure")
 
 
+class NewFindingThenAcceptedAdapter(FakeAdapter):
+    def _emit(self, out_dir, result):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "raw.stdout").write_text(json.dumps(result))
+        (out_dir / "raw.stderr").write_text("")
+        return {
+            "result": result,
+            "meta": {
+                "status": "OK",
+                "duration_ms": 1,
+                "exit_code": 0,
+                "model": self.name,
+                "reasoning": "test",
+                "timeout_seconds": 1,
+            },
+        }
+
+    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
+        self.calls += 1
+        result = empty_result(self.policy_path)
+
+        if self.calls == 2 and self.name == "glm":
+            result["summary"] = "Found one non-blocking issue."
+            result["findings"] = [{
+                "local_id": "N1",
+                "severity": "LOW",
+                "blocking": False,
+                "category": "correctness",
+                "title": "Cycle-local finding",
+                "claim": "A material but non-blocking issue exists.",
+                "evidence": [{
+                    "path": "design.md",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "description": "Primary evidence.",
+                }],
+                "rule_refs": [],
+                "rationale": "The first reviewer found it during cross-check.",
+                "required_change": "Clarify the design.",
+            }]
+            result["freeze_assessment"] = {
+                "can_freeze": False,
+                "blocking_local_ids": [],
+            }
+        elif self.calls == 2 and self.name == "deepseek":
+            result["summary"] = "Accepted the cycle-one finding."
+            result["adjudications"] = [{
+                "finding_id": "F001",
+                "decision": "ACCEPT",
+                "rationale": "Verified independently.",
+                "evidence": [{
+                    "path": "design.md",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "description": "Confirmed evidence.",
+                }],
+                "replacement_local_id": None,
+                "duplicate_of": None,
+            }]
+        elif self.calls == 3 and self.name == "deepseek":
+            result["summary"] = "Found one final-cycle issue."
+            result["findings"] = [{
+                "local_id": "N2",
+                "severity": "LOW",
+                "blocking": False,
+                "category": "correctness",
+                "title": "Final-cycle finding",
+                "claim": "A second non-blocking issue exists.",
+                "evidence": [{
+                    "path": "design.md",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "description": "Second-cycle evidence.",
+                }],
+                "rule_refs": [],
+                "rationale": "The reverse-order reviewer found it in the final cycle.",
+                "required_change": "Clarify the second point.",
+            }]
+            result["freeze_assessment"] = {
+                "can_freeze": False,
+                "blocking_local_ids": [],
+            }
+        elif self.calls == 3 and self.name == "glm":
+            result["summary"] = "Accepted the final-cycle finding."
+            result["adjudications"] = [{
+                "finding_id": "F002",
+                "decision": "ACCEPT",
+                "rationale": "Verified independently in the final cycle.",
+                "evidence": [{
+                    "path": "design.md",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "description": "Confirmed second-cycle evidence.",
+                }],
+                "replacement_local_id": None,
+                "duplicate_of": None,
+            }]
+
+        return self._emit(out_dir, result)
+
+
 def make_case(td):
     repo = td / "repo"
     repo.mkdir()
@@ -216,6 +317,28 @@ class FullFlowTests(unittest.TestCase):
             self.assertTrue(Path(result["review_path"]).is_file())
             self.assertEqual(controller.reviewers["glm"].calls, 2)
             self.assertEqual(controller.reviewers["deepseek"].calls, 2)
+
+    def test_final_cycle_can_freeze_when_new_findings_are_fully_adjudicated(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            _, rule, _, cfg_path, inv = make_case(td)
+            controller = LoopReviewController(load_config(cfg_path), SKILL)
+            glm = NewFindingThenAcceptedAdapter("glm", str(rule.resolve()))
+            deepseek = NewFindingThenAcceptedAdapter("deepseek", str(rule.resolve()))
+            controller.reviewers = {"glm": glm, "deepseek": deepseek}
+
+            result = controller.run(inv)
+
+            self.assertEqual(result["status"], "FROZEN_PASS")
+            self.assertEqual(result["cycles"], 2)
+            self.assertEqual(result["review_calls"], 6)
+            self.assertEqual(glm.calls, 3)
+            self.assertEqual(deepseek.calls, 3)
+
+            run_dir = Path(result["run_dir"])
+            ledger = json.loads((run_dir / "state" / "issue-ledger.json").read_text())
+            self.assertEqual(ledger["findings"]["F001"]["status"], "ACCEPTED")
+            self.assertEqual(ledger["findings"]["F002"]["status"], "ACCEPTED")
 
     def test_discovery_failure_preserves_peer_result_and_counts_both_attempts(self):
         with tempfile.TemporaryDirectory() as td:

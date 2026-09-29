@@ -33,18 +33,20 @@ Discovery origin counts as that reviewer's ACCEPT position.
 
 ## Convergence
 
-Converged after a complete serial cycle when:
+Before the final allowed cycle, converge only after a quiet complete serial cycle when:
 - no new finding was created during the cycle
-- no `OPEN` or `DISPUTED` finding remains
+- no `OPEN` or `DISPUTED` finding remains after both reviewers finish the cycle
 - every worker confirmed every required `AGENTS.md`
 - target/repository fingerprint is unchanged
+
+At `max_cycles`, a newly created finding does not by itself force `UNRESOLVED_MAX_CYCLES` if the other reviewer adjudicated it in that same cycle and no `OPEN` or `DISPUTED` finding remains. A finding created by the second reviewer remains `OPEN` and therefore still prevents convergence. This preserves the extra reverse-order cross-check when budget remains while allowing a fully adjudicated final cycle to freeze.
 
 ## Final states
 
 - `FROZEN_PASS`: converged and no accepted blocking finding.
 - `FROZEN_CHANGES_REQUIRED`: converged with one or more accepted blocking findings.
 - `FROZEN_DISPUTED`: max cycles reached with disputed findings.
-- `UNRESOLVED_MAX_CYCLES`: max cycles reached with open/new findings.
+- `UNRESOLVED_MAX_CYCLES`: max cycles reached with one or more `OPEN` findings that did not receive an independent second reviewer position.
 - `FAILED`: infrastructure, target-drift, read-only, timeout, or protocol failure.
 
 The frozen object is the review conclusion, not a repaired target.

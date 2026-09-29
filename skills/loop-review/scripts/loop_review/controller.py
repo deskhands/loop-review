@@ -892,7 +892,7 @@ class LoopReviewController:
             state["cycles_completed"] = cycle
             last_cycle_had_new = bool(cycle_added)
             current_active = active_ids(ledger)
-            converged = (not current_active) and (not last_cycle_had_new)
+            converged = (not current_active) and ((not last_cycle_had_new) or cycle == max_cycles)
             atomic_json(run_dir / "state" / "state.json", state)
             if converged:
                 break
