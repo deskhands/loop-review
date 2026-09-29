@@ -107,6 +107,27 @@ class PiAdapterTests(unittest.TestCase):
         self.assertEqual(stats["tool_calls"], 2)
         self.assertEqual(stats["max_identical_tool_calls"], 2)
 
+    def test_parser_accepts_terminal_json_after_narration(self):
+        result = {"ok": True}
+        raw = event_stream(result)
+        lines = raw.splitlines()
+        event = json.loads(lines[-2])
+        text = event["message"]["content"][0]["text"]
+        event["message"]["content"][0]["text"] = "Verified evidence. Returning result.\n\n" + text
+        lines[-2] = json.dumps(event)
+        parsed, _ = self.adapter._extract("\n".join(lines) + "\n")
+        self.assertEqual(parsed, result)
+
+    def test_parser_does_not_repair_malformed_terminal_json(self):
+        result = {"ok": True}
+        raw = event_stream(result)
+        lines = raw.splitlines()
+        event = json.loads(lines[-2])
+        event["message"]["content"][0]["text"] = 'Narration with {braces}.\n{"ok":true'
+        lines[-2] = json.dumps(event)
+        with self.assertRaises(LoopReviewError):
+            self.adapter._extract("\n".join(lines) + "\n")
+
     def test_timeout_persists_partial_event_stats(self):
         partial = event_stream({"ok": True}, repeated=True)
         error = LoopReviewError(

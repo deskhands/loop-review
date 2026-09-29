@@ -124,14 +124,32 @@ class PiAdapter(ReviewerAdapter):
                 "Pi response did not contain a final assistant text result",
                 {"stats": stats},
             )
+
         try:
             result = json.loads(final_text)
-        except json.JSONDecodeError as e:
-            raise LoopReviewError(
-                "INVALID_JSON",
-                f"Pi final assistant text was not JSON: {e}",
-                {"final_text": final_text[-4000:], "stats": stats},
-            )
+        except json.JSONDecodeError as first_error:
+            decoder = json.JSONDecoder()
+            result = None
+            for index, char in enumerate(final_text):
+                if char != "{":
+                    continue
+                try:
+                    candidate, consumed = decoder.raw_decode(final_text[index:])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                if final_text[index + consumed :].strip():
+                    continue
+                result = candidate
+                break
+            if result is None:
+                raise LoopReviewError(
+                    "INVALID_JSON",
+                    f"Pi final assistant text was not JSON: {first_error}",
+                    {"final_text": final_text[-4000:], "stats": stats},
+                )
+
         if not isinstance(result, dict):
             raise LoopReviewError(
                 "INVALID_JSON",
