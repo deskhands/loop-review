@@ -154,7 +154,7 @@ def make_case(td):
         'version = 1\n'
         '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
         '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-        '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+        '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
         '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
     )
     invocation = {
@@ -190,12 +190,12 @@ class FullFlowTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             controller.reviewers = {
-                "grok": FakeAdapter("grok", str(rule.resolve())),
+                "glm": FakeAdapter("glm", str(rule.resolve())),
                 "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
             }
 
@@ -214,7 +214,7 @@ class FullFlowTests(unittest.TestCase):
             self.assertEqual(result["review_calls"], 4)
             self.assertEqual(result["cycles"], 1)
             self.assertTrue(Path(result["review_path"]).is_file())
-            self.assertEqual(controller.reviewers["grok"].calls, 2)
+            self.assertEqual(controller.reviewers["glm"].calls, 2)
             self.assertEqual(controller.reviewers["deepseek"].calls, 2)
 
     def test_discovery_failure_preserves_peer_result_and_counts_both_attempts(self):
@@ -237,12 +237,12 @@ class FullFlowTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             controller.reviewers = {
-                "grok": TimeoutAdapter("grok", str(rule.resolve())),
+                "glm": TimeoutAdapter("glm", str(rule.resolve())),
                 "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
             }
 
@@ -264,7 +264,7 @@ class FullFlowTests(unittest.TestCase):
             self.assertEqual(state["review_calls"], 2)
             self.assertTrue((run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").is_file())
             self.assertTrue((run_dir / "rounds" / "00-discovery" / "deepseek" / "meta.json").is_file())
-            self.assertTrue((run_dir / "rounds" / "00-discovery" / "grok" / "error.json").is_file())
+            self.assertTrue((run_dir / "rounds" / "00-discovery" / "glm" / "error.json").is_file())
 
 
     def test_resume_reuses_successful_discovery_and_reruns_only_missing_slots(self):
@@ -274,7 +274,7 @@ class FullFlowTests(unittest.TestCase):
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             deepseek = FakeAdapter("deepseek", str(rule.resolve()))
             controller.reviewers = {
-                "grok": TimeoutAdapter("grok", str(rule.resolve())),
+                "glm": TimeoutAdapter("glm", str(rule.resolve())),
                 "deepseek": deepseek,
             }
 
@@ -283,9 +283,9 @@ class FullFlowTests(unittest.TestCase):
             run_dir = Path(caught.exception.details["run_dir"])
             saved_peer = (run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").read_text()
 
-            resumed_grok = FakeAdapter("grok", str(rule.resolve()))
+            resumed_glm = FakeAdapter("glm", str(rule.resolve()))
             controller.reviewers = {
-                "grok": resumed_grok,
+                "glm": resumed_glm,
                 "deepseek": deepseek,
             }
             result = controller.resume(run_dir)
@@ -299,7 +299,7 @@ class FullFlowTests(unittest.TestCase):
                 (run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").read_text(),
                 saved_peer,
             )
-            self.assertEqual(resumed_grok.calls, 2)
+            self.assertEqual(resumed_glm.calls, 2)
             self.assertEqual(deepseek.calls, 2)
 
     def test_resume_crosscheck_failure_reruns_only_failed_slot(self):
@@ -307,21 +307,21 @@ class FullFlowTests(unittest.TestCase):
             td = Path(td)
             _, rule, _, cfg_path, inv = make_case(td)
             controller = LoopReviewController(load_config(cfg_path), SKILL)
-            grok = FakeAdapter("grok", str(rule.resolve()))
+            glm = FakeAdapter("glm", str(rule.resolve()))
             deepseek = FailOnCallAdapter("deepseek", str(rule.resolve()), fail_on=2)
-            controller.reviewers = {"grok": grok, "deepseek": deepseek}
+            controller.reviewers = {"glm": glm, "deepseek": deepseek}
 
             with self.assertRaises(LoopReviewError) as caught:
                 controller.run(inv)
             self.assertEqual(caught.exception.code, "TIMEOUT")
             run_dir = Path(caught.exception.details["run_dir"])
-            self.assertEqual(grok.calls, 2)
+            self.assertEqual(glm.calls, 2)
             self.assertEqual(deepseek.calls, 2)
 
             resumed_deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            resumed_grok = FakeAdapter("grok", str(rule.resolve()))
+            resumed_glm = FakeAdapter("glm", str(rule.resolve()))
             controller.reviewers = {
-                "grok": resumed_grok,
+                "glm": resumed_glm,
                 "deepseek": resumed_deepseek,
             }
             result = controller.resume(run_dir)
@@ -331,7 +331,7 @@ class FullFlowTests(unittest.TestCase):
             self.assertEqual(result["resume"]["reused_results"], 3)
             self.assertEqual(result["resume"]["recovered_from_raw"], 0)
             self.assertEqual(result["resume"]["rerun_calls"], 1)
-            self.assertEqual(resumed_grok.calls, 0)
+            self.assertEqual(resumed_glm.calls, 0)
             self.assertEqual(resumed_deepseek.calls, 1)
 
     def test_resume_recovers_valid_raw_without_model_call(self):
@@ -339,15 +339,15 @@ class FullFlowTests(unittest.TestCase):
             td = Path(td)
             _, rule, _, cfg_path, inv = make_case(td)
             controller = LoopReviewController(load_config(cfg_path), SKILL)
-            grok = RecoverableInvalidAdapter("grok", str(rule.resolve()), fail_on=2)
+            glm = RecoverableInvalidAdapter("glm", str(rule.resolve()), fail_on=2)
             deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {"grok": grok, "deepseek": deepseek}
+            controller.reviewers = {"glm": glm, "deepseek": deepseek}
 
             with self.assertRaises(LoopReviewError) as caught:
                 controller.run(inv)
             self.assertEqual(caught.exception.code, "INVALID_JSON")
             run_dir = Path(caught.exception.details["run_dir"])
-            before_grok = grok.calls
+            before_glm = glm.calls
             before_deepseek = deepseek.calls
 
             result = controller.resume(run_dir)
@@ -357,10 +357,10 @@ class FullFlowTests(unittest.TestCase):
             self.assertEqual(result["resume"]["reused_results"], 2)
             self.assertEqual(result["resume"]["recovered_from_raw"], 1)
             self.assertEqual(result["resume"]["rerun_calls"], 1)
-            self.assertEqual(grok.calls, before_grok)
+            self.assertEqual(glm.calls, before_glm)
             self.assertEqual(deepseek.calls, before_deepseek + 1)
             recovered_meta = json.loads(
-                (run_dir / "rounds" / "01-cross-check" / "grok" / "meta.json").read_text()
+                (run_dir / "rounds" / "01-cross-check" / "glm" / "meta.json").read_text()
             )
             self.assertEqual(recovered_meta["status"], "RECOVERED_FROM_RAW")
 
@@ -371,7 +371,7 @@ class FullFlowTests(unittest.TestCase):
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             deepseek = FakeAdapter("deepseek", str(rule.resolve()))
             controller.reviewers = {
-                "grok": TimeoutAdapter("grok", str(rule.resolve())),
+                "glm": TimeoutAdapter("glm", str(rule.resolve())),
                 "deepseek": deepseek,
             }
 
@@ -379,16 +379,16 @@ class FullFlowTests(unittest.TestCase):
                 controller.run(inv)
             run_dir = Path(caught.exception.details["run_dir"])
             target.write_text("# Design\nChanged after failure.\n")
-            resumed_grok = FakeAdapter("grok", str(rule.resolve()))
+            resumed_glm = FakeAdapter("glm", str(rule.resolve()))
             controller.reviewers = {
-                "grok": resumed_grok,
+                "glm": resumed_glm,
                 "deepseek": deepseek,
             }
 
             with self.assertRaises(LoopReviewError) as resumed:
                 controller.resume(run_dir)
             self.assertEqual(resumed.exception.code, "FAILED_INPUT_CHANGED")
-            self.assertEqual(resumed_grok.calls, 0)
+            self.assertEqual(resumed_glm.calls, 0)
             self.assertEqual(deepseek.calls, 1)
 
 
@@ -398,7 +398,7 @@ class FullFlowTests(unittest.TestCase):
             _, rule, _, cfg_path, inv = make_case(td)
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             controller.reviewers = {
-                "grok": TimeoutAdapter("grok", str(rule.resolve())),
+                "glm": TimeoutAdapter("glm", str(rule.resolve())),
                 "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
             }
             with self.assertRaises(LoopReviewError) as caught:
@@ -406,16 +406,16 @@ class FullFlowTests(unittest.TestCase):
             run_dir = Path(caught.exception.details["run_dir"])
 
             changed = load_config(cfg_path)
-            changed["reviewers"]["grok"]["model"] = "different-model"
+            changed["reviewers"]["glm"]["model"] = "different-model"
             changed_controller = LoopReviewController(changed, SKILL)
             changed_controller.reviewers = {
-                "grok": FakeAdapter("grok", str(rule.resolve())),
+                "glm": FakeAdapter("glm", str(rule.resolve())),
                 "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
             }
             with self.assertRaises(LoopReviewError) as resumed:
                 changed_controller.resume(run_dir)
             self.assertEqual(resumed.exception.code, "RESUME_CONFIG_CHANGED")
-            self.assertEqual(changed_controller.reviewers["grok"].calls, 0)
+            self.assertEqual(changed_controller.reviewers["glm"].calls, 0)
             self.assertEqual(changed_controller.reviewers["deepseek"].calls, 0)
 
     def test_resume_refuses_terminal_success(self):
@@ -424,7 +424,7 @@ class FullFlowTests(unittest.TestCase):
             _, rule, _, cfg_path, inv = make_case(td)
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             controller.reviewers = {
-                "grok": FakeAdapter("grok", str(rule.resolve())),
+                "glm": FakeAdapter("glm", str(rule.resolve())),
                 "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
             }
             result = controller.run(inv)
@@ -449,16 +449,16 @@ class FullFlowTests(unittest.TestCase):
             controller = LoopReviewController(load_config(cfg_path), SKILL)
             deepseek = FakeAdapter("deepseek", str(rule.resolve()))
             controller.reviewers = {
-                "grok": TimeoutAdapter("grok", str(rule.resolve())),
+                "glm": TimeoutAdapter("glm", str(rule.resolve())),
                 "deepseek": deepseek,
             }
             with self.assertRaises(LoopReviewError) as caught:
                 controller.run(inv)
             run_dir = Path(caught.exception.details["run_dir"])
 
-            resumed_grok = FakeAdapter("grok", str(rule.resolve()))
+            resumed_glm = FakeAdapter("glm", str(rule.resolve()))
             controller.reviewers = {
-                "grok": resumed_grok,
+                "glm": resumed_glm,
                 "deepseek": deepseek,
             }
             result = controller.resume(run_dir)
@@ -466,7 +466,7 @@ class FullFlowTests(unittest.TestCase):
             self.assertEqual(result["status"], "FROZEN_PASS")
             self.assertEqual(result["resume"]["reused_results"], 1)
             self.assertEqual(result["resume"]["rerun_calls"], 3)
-            self.assertEqual(resumed_grok.calls, 2)
+            self.assertEqual(resumed_glm.calls, 2)
             self.assertEqual(deepseek.calls, 2)
 
 

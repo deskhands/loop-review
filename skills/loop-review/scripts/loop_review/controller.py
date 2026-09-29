@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .adapters import ClaudeAdapter, OpenCodeAdapter
+from .adapters import ClaudeAdapter
 from .agents_rules import discover_rules
 from .git_state import (
     ensure_repo,
@@ -48,10 +48,10 @@ class LoopReviewController:
         self.config = config
         self.skill_root = skill_root.resolve()
         self.reviewers = {
-            "grok": OpenCodeAdapter("grok", config["reviewers"]["grok"]),
+            "glm": ClaudeAdapter("glm", config["reviewers"]["glm"]),
             "deepseek": ClaudeAdapter("deepseek", config["reviewers"]["deepseek"]),
         }
-        self.aliases = {"grok": "Reviewer-A", "deepseek": "Reviewer-B"}
+        self.aliases = {"glm": "Reviewer-A", "deepseek": "Reviewer-B"}
 
     def doctor(self, cwd: Optional[Path] = None) -> Dict[str, Any]:
         cwd = (cwd or Path.home()).resolve()
@@ -303,6 +303,25 @@ class LoopReviewController:
         write_text(preflight_dir / "preflight.log", "Both reviewer health checks passed.\n")
         return result
 
+    def _round_dir(self, run_dir: Path, round_name: str, name: str) -> Path:
+        return run_dir / "rounds" / round_name / name
+
+    def _existing_round_dir(self, run_dir: Path, round_name: str, name: str) -> Path:
+        canonical = self._round_dir(run_dir, round_name, name)
+        if canonical.exists():
+            return canonical
+        if name == "glm":
+            legacy = run_dir / "rounds" / round_name / "grok"
+            if legacy.exists():
+                return legacy
+        return canonical
+
+    def _preflight_checkpoint_exists(self, run_dir: Path, name: str) -> bool:
+        canonical = run_dir / "preflight" / f"{name}.json"
+        if canonical.is_file():
+            return True
+        return name == "glm" and (run_dir / "preflight" / "grok.json").is_file()
+
     def _prior_review_paths(self, run_dir: Path) -> List[str]:
         return sorted(str(p.resolve()) for p in (run_dir / "rounds").glob("**/review.md"))
 
@@ -487,26 +506,61 @@ class LoopReviewController:
         self._verify_fingerprint(prepared)
         return prepared, manifest
 
-    def _verify_resume_config(self, manifest: Dict[str, Any]) -> None:
+    def _verify_resume_config(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
         mapping = {
-            "reviewer-a": "grok",
+            "reviewer-a": "glm",
             "reviewer-b": "deepseek",
         }
         saved = manifest.get("reviewers")
         if not isinstance(saved, dict):
             raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Run manifest has no reviewer configuration")
+
+        migrations: List[Dict[str, Any]] = []
         for alias, name in mapping.items():
             old = saved.get(alias)
             current = self.config["reviewers"][name]
             if not isinstance(old, dict):
                 raise LoopReviewError("RESUME_CHECKPOINT_INVALID", f"Run manifest is missing {alias}")
-            for key in ("adapter", "model", "reasoning"):
-                if old.get(key) != current.get(key):
-                    raise LoopReviewError(
-                        "RESUME_CONFIG_CHANGED",
-                        f"{alias} {key} changed since the failed run",
-                        {"saved": old.get(key), "current": current.get(key)},
-                    )
+
+            old_model = str(old.get("model", ""))
+            current_model = str(current.get("model", ""))
+            old_canonical = old_model.removeprefix("openrouter/")
+            current_canonical = current_model.removeprefix("openrouter/")
+            if old_canonical != current_canonical:
+                raise LoopReviewError(
+                    "RESUME_CONFIG_CHANGED",
+                    f"{alias} model changed since the failed run",
+                    {"saved": old_model, "current": current_model},
+                )
+            if old.get("reasoning") != current.get("reasoning"):
+                raise LoopReviewError(
+                    "RESUME_CONFIG_CHANGED",
+                    f"{alias} reasoning changed since the failed run",
+                    {"saved": old.get("reasoning"), "current": current.get("reasoning")},
+                )
+
+            old_adapter = old.get("adapter")
+            current_adapter = current.get("adapter")
+            if old_adapter == current_adapter:
+                continue
+            if (
+                alias == "reviewer-a"
+                and old_adapter == "opencode"
+                and current_adapter == "claude"
+            ):
+                migrations.append({
+                    "reviewer": alias,
+                    "from_adapter": old_adapter,
+                    "to_adapter": current_adapter,
+                    "model": current_model,
+                })
+                continue
+            raise LoopReviewError(
+                "RESUME_CONFIG_CHANGED",
+                f"{alias} adapter changed since the failed run",
+                {"saved": old_adapter, "current": current_adapter},
+            )
+        return migrations
 
     def _archive_resume_snapshot(self, run_dir: Path) -> Path:
         root = run_dir / "resume"
@@ -636,13 +690,16 @@ class LoopReviewController:
             "reused_results": 0,
             "recovered_from_raw": 0,
             "rerun_calls": 0,
+            "reviewer_migrations": list(state.get("reviewer_migrations", [])),
         } if reuse_checkpoints else None
         summaries: List[str] = []
 
-        preflight_dir = run_dir / "preflight"
-        preflight_ok = all(
-            (preflight_dir / f"{name}.json").is_file()
-            for name in ("grok", "deepseek")
+        preflight_ok = (
+            not state.get("reviewer_migrations")
+            and all(
+                self._preflight_checkpoint_exists(run_dir, name)
+                for name in ("glm", "deepseek")
+            )
         )
         if not reuse_checkpoints or not preflight_ok:
             state["status"] = "PREFLIGHT"
@@ -654,13 +711,16 @@ class LoopReviewController:
         atomic_json(run_dir / "state" / "state.json", state)
         discovery: Dict[str, Dict[str, Any]] = {}
         missing: List[str] = []
+        checkpoint_dirs: Dict[str, Path] = {}
 
-        for name in ("grok", "deepseek"):
+        for name in ("glm", "deepseek"):
             checkpoint = None
+            checkpoint_dir = self._existing_round_dir(run_dir, "00-discovery", name)
+            checkpoint_dirs[name] = checkpoint_dir
             if reuse_checkpoints:
                 checkpoint = self._checkpoint_result(
                     name=name,
-                    out_dir=run_dir / "rounds" / "00-discovery" / name,
+                    out_dir=checkpoint_dir,
                     prepared=prepared,
                     active=[],
                     phase="discovery",
@@ -668,6 +728,7 @@ class LoopReviewController:
             if checkpoint is None:
                 missing.append(name)
             else:
+                checkpoint["artifact_dir"] = str(checkpoint_dir)
                 discovery[name] = checkpoint
                 assert resume_stats is not None
                 resume_stats[
@@ -677,10 +738,12 @@ class LoopReviewController:
                 ] += 1
 
         def discovery_call(name: str) -> Tuple[str, Dict[str, Any]]:
-            out_dir = run_dir / "rounds" / "00-discovery" / name
+            out_dir = self._round_dir(run_dir, "00-discovery", name)
             if reuse_checkpoints:
-                self._archive_failed_slot(out_dir)
-            return name, self._run_worker(
+                self._archive_failed_slot(checkpoint_dirs[name])
+                if checkpoint_dirs[name] != out_dir:
+                    self._archive_failed_slot(out_dir)
+            response = self._run_worker(
                 name=name,
                 out_dir=out_dir,
                 prepared=prepared,
@@ -689,6 +752,8 @@ class LoopReviewController:
                 active=[],
                 phase="discovery",
             )
+            response["artifact_dir"] = str(out_dir)
+            return name, response
 
         if missing:
             state["review_calls"] = int(state.get("review_calls", 0)) + len(missing)
@@ -725,12 +790,15 @@ class LoopReviewController:
                 raise LoopReviewError(error.code, error.message, details)
 
         ledger = new_ledger()
-        for name in ("grok", "deepseek"):
+        for name in ("glm", "deepseek"):
             stable_map = add_discovery_result(
                 ledger, discovery[name]["result"], self.aliases[name]
             )
             summaries.append(discovery[name]["result"]["summary"])
-            out_dir = run_dir / "rounds" / "00-discovery" / name
+            out_dir = Path(
+                discovery[name].get("artifact_dir")
+                or self._round_dir(run_dir, "00-discovery", name)
+            )
             write_text(
                 out_dir / "review.md",
                 render_round(discovery[name]["result"], stable_map),
@@ -750,15 +818,17 @@ class LoopReviewController:
 
         for cycle in range(1, max_cycles + 1):
             cycle_added: List[str] = []
-            order = ("grok", "deepseek") if cycle == 1 else ("deepseek", "grok")
+            order = ("glm", "deepseek") if cycle == 1 else ("deepseek", "glm")
             for name in order:
                 current_active = active_ids(ledger)
-                out_dir = run_dir / "rounds" / f"{cycle:02d}-cross-check" / name
+                round_name = f"{cycle:02d}-cross-check"
+                out_dir = self._round_dir(run_dir, round_name, name)
+                checkpoint_dir = self._existing_round_dir(run_dir, round_name, name)
                 checkpoint = None
                 if reuse_checkpoints:
                     checkpoint = self._checkpoint_result(
                         name=name,
-                        out_dir=out_dir,
+                        out_dir=checkpoint_dir,
                         prepared=prepared,
                         active=current_active,
                         phase="cross-check",
@@ -771,7 +841,9 @@ class LoopReviewController:
                             "Review model call budget exceeded",
                         )
                     if reuse_checkpoints:
-                        self._archive_failed_slot(out_dir)
+                        self._archive_failed_slot(checkpoint_dir)
+                        if checkpoint_dir != out_dir:
+                            self._archive_failed_slot(out_dir)
                     state["review_calls"] = int(state.get("review_calls", 0)) + 1
                     if resume_stats is not None:
                         resume_stats["rerun_calls"] += 1
@@ -786,12 +858,17 @@ class LoopReviewController:
                         phase="cross-check",
                     )
                     checkpoint["source"] = "rerun" if reuse_checkpoints else "new"
-                elif resume_stats is not None:
-                    resume_stats[
-                        "recovered_from_raw"
-                        if checkpoint["source"] == "recovered"
-                        else "reused_results"
-                    ] += 1
+                    checkpoint["artifact_dir"] = str(out_dir)
+                else:
+                    checkpoint["artifact_dir"] = str(checkpoint_dir)
+                    if resume_stats is not None:
+                        resume_stats[
+                            "recovered_from_raw"
+                            if checkpoint["source"] == "recovered"
+                            else "reused_results"
+                        ] += 1
+
+                out_dir = Path(checkpoint["artifact_dir"])
 
                 stable_map, added = apply_crosscheck_result(
                     ledger,
@@ -908,8 +985,10 @@ class LoopReviewController:
         self._archive_resume_snapshot(run_dir)
         try:
             prepared, manifest = self._load_prepared_for_resume(run_dir)
-            self._verify_resume_config(manifest)
+            reviewer_migrations = self._verify_resume_config(manifest)
             state["status"] = "RESUMING"
+            if reviewer_migrations:
+                state["reviewer_migrations"] = reviewer_migrations
             state["resume_count"] = int(state.get("resume_count", 0)) + 1
             state.pop("failure_code", None)
             atomic_json(run_dir / "state" / "state.json", state)
@@ -956,11 +1035,10 @@ class LoopReviewController:
                 "loop": copy.deepcopy(self.config["loop"]),
                 "reviewers": {
                     "reviewer-a": {
-                        "adapter": self.config["reviewers"]["grok"]["adapter"],
-                        "model": self.config["reviewers"]["grok"]["model"],
-                        "reasoning": self.config["reviewers"]["grok"]["reasoning"],
-                        "steps": int(self.config["reviewers"]["grok"].get("steps", 96)),
-                        "timeout_seconds": int(self.config["reviewers"]["grok"]["timeout_seconds"]),
+                        "adapter": self.config["reviewers"]["glm"]["adapter"],
+                        "model": self.config["reviewers"]["glm"]["model"],
+                        "reasoning": self.config["reviewers"]["glm"]["reasoning"],
+                        "timeout_seconds": int(self.config["reviewers"]["glm"]["timeout_seconds"]),
                     },
                     "reviewer-b": {
                         "adapter": self.config["reviewers"]["deepseek"]["adapter"],
@@ -977,7 +1055,7 @@ class LoopReviewController:
 
             if dry_run:
                 ledger = new_ledger()
-                for name in ("grok", "deepseek"):
+                for name in ("glm", "deepseek"):
                     out_dir = run_dir / "rounds" / "00-discovery" / name
                     prompt = build_prompt(
                         skill_root=self.skill_root,

@@ -88,14 +88,14 @@ class DetachedCliTests(unittest.TestCase):
         }))
         return repo, inv
 
-    def _write_config(self, td, grok_executable="opencode", deepseek_executable="claude"):
+    def _write_config(self, td, glm_executable="claude", deepseek_executable="claude"):
         run_root = td / "runs"
         cfg = td / "config.toml"
         cfg.write_text(
             'version = 1\n'
             '[paths]\nrun_root = "' + str(run_root) + '"\n'
             '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-            '[reviewers.grok]\nadapter = "opencode"\nexecutable = "' + grok_executable + '"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+            '[reviewers.glm]\nadapter = "claude"\nexecutable = "' + glm_executable + '"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
             '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "' + deepseek_executable + '"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
         )
         return cfg

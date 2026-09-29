@@ -21,27 +21,12 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "opencode"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "claude-glm"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             cfg = load_config(p)
-            self.assertEqual(cfg["reviewers"]["grok"]["executable"], "opencode")
-            self.assertEqual(cfg["reviewers"]["grok"]["steps"], 96)
+            self.assertEqual(cfg["reviewers"]["glm"]["executable"], "claude-glm")
             self.assertEqual(cfg["reviewers"]["deepseek"]["executable"], "claude")
-
-    def test_config_rejects_nonpositive_opencode_steps(self):
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "config.toml"
-            p.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "opencode"\nmodel = "x"\nreasoning = "high"\nsteps = 0\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            with self.assertRaises(LoopReviewError) as caught:
-                load_config(p)
-            self.assertEqual(caught.exception.code, "CONFIG_ERROR")
 
     def test_config_rejects_adapter_mismatch(self):
         with tempfile.TemporaryDirectory() as td:
@@ -50,7 +35,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             with self.assertRaises(LoopReviewError):
@@ -153,7 +138,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -179,7 +164,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(repo / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -203,7 +188,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.grok]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -223,6 +208,73 @@ class HardeningTests(unittest.TestCase):
             run_dir = Path(caught.exception.details["run_dir"])
             status = json.loads((run_dir / "final" / "status.json").read_text())
             self.assertEqual(status["failure_code"], "UNEXPECTED_ERROR")
+
+    def test_resume_allows_known_glm_harness_migration(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg_path = td / "config.toml"
+            cfg_path.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "z-ai/glm-5.3-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
+            manifest = {
+                "reviewers": {
+                    "reviewer-a": {
+                        "adapter": "opencode",
+                        "model": "openrouter/z-ai/glm-5.3-flash",
+                        "reasoning": "high",
+                    },
+                    "reviewer-b": {
+                        "adapter": "claude",
+                        "model": "deepseek-flash[1m]",
+                        "reasoning": "max",
+                    },
+                }
+            }
+            migrations = controller._verify_resume_config(manifest)
+            self.assertEqual(migrations, [{
+                "reviewer": "reviewer-a",
+                "from_adapter": "opencode",
+                "to_adapter": "claude",
+                "model": "z-ai/glm-5.3-flash",
+            }])
+
+    def test_resume_reads_legacy_reviewer_a_artifact_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg_path = td / "config.toml"
+            cfg_path.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.glm]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
+            run_dir = td / "run"
+            legacy = run_dir / "rounds" / "00-discovery" / "grok"
+            legacy.mkdir(parents=True)
+            preflight = run_dir / "preflight"
+            preflight.mkdir(parents=True)
+            (preflight / "grok.json").write_text("{}")
+
+            self.assertEqual(
+                controller._existing_round_dir(run_dir, "00-discovery", "glm"),
+                legacy,
+            )
+            self.assertTrue(controller._preflight_checkpoint_exists(run_dir, "glm"))
+
+            canonical = run_dir / "rounds" / "00-discovery" / "glm"
+            canonical.mkdir()
+            self.assertEqual(
+                controller._existing_round_dir(run_dir, "00-discovery", "glm"),
+                canonical,
+            )
+
 
 
 if __name__ == "__main__":

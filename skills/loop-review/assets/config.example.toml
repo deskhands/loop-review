@@ -7,17 +7,18 @@ run_root = "~/code/agents-tmp/loop-review"
 max_cycles = 2
 max_model_calls = 6
 
-[reviewers.grok]
-adapter = "opencode"
-executable = "opencode"
-model = "openrouter/z-ai/glm-5.3-flash"
+# Provider-isolated Claude Code launcher for OpenRouter/GLM.
+[reviewers.glm]
+adapter = "claude"
+executable = "claude-glm"
+model = "z-ai/glm-5.3-flash"
 reasoning = "high"
-steps = 96
-timeout_seconds = 3600
+timeout_seconds = 1800
 
+# Provider-isolated Claude Code launcher for DeepSeek official.
 [reviewers.deepseek]
 adapter = "claude"
-executable = "claude"
+executable = "claude-deepseek"
 model = "deepseek-flash[1m]"
 reasoning = "max"
 timeout_seconds = 1800

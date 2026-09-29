@@ -63,17 +63,13 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
         run_root = expand_path(cfg["paths"]["run_root"])
         loop = cfg["loop"]
         reviewers = cfg["reviewers"]
-        expected_adapters = {"grok": "opencode", "deepseek": "claude"}
-        for name in ("grok", "deepseek"):
+        expected_adapters = {"glm": "claude", "deepseek": "claude"}
+        for name in ("glm", "deepseek"):
             r = reviewers[name]
             r["executable"] = _normalize_executable(r["executable"])
             for required in ("adapter", "model", "reasoning", "timeout_seconds"):
                 if required not in r:
                     raise KeyError(f"reviewers.{name}.{required}")
-            if name == "grok":
-                r["steps"] = int(r.get("steps", 96))
-                if r["steps"] <= 0:
-                    raise LoopReviewError("CONFIG_ERROR", "reviewers.grok.steps must be a positive integer")
             if r["adapter"] != expected_adapters[name]:
                 raise LoopReviewError(
                     "CONFIG_ERROR",

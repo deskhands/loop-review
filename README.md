@@ -84,15 +84,15 @@ You need:
 - Python 3.9+
 - Git
 - Claude Code CLI
-- OpenCode CLI
-- working authentication/configuration for the model providers used by those CLIs
+- two provider-isolated Claude Code launchers (or equivalent executables): one for OpenRouter/GLM and one for DeepSeek official
+- working authentication/configuration for both providers
 
 The default example configuration uses:
 
-- GLM-5.3 Flash via OpenCode/OpenRouter with `high` reasoning
-- DeepSeek via Claude Code with `max` reasoning
+- GLM-5.3 Flash via Claude Code + OpenRouter with `high` reasoning
+- DeepSeek via Claude Code + DeepSeek official with `max` reasoning
 
-Model identifiers and executable locations are configurable.
+Model identifiers and executable locations are configurable. The two launcher processes isolate provider environment variables, so both reviewers can run concurrently without mutating global Claude Code settings.
 
 ## Configure
 
@@ -120,31 +120,30 @@ run_root = "~/code/agents-tmp/loop-review"
 max_cycles = 2
 max_model_calls = 6
 
-[reviewers.grok]
-adapter = "opencode"
-executable = "opencode"
-model = "openrouter/z-ai/glm-5.3-flash"
+[reviewers.glm]
+adapter = "claude"
+executable = "claude-glm"
+model = "z-ai/glm-5.3-flash"
 reasoning = "high"
-steps = 96
-timeout_seconds = 3600
+timeout_seconds = 1800
 
 [reviewers.deepseek]
 adapter = "claude"
-executable = "claude"
+executable = "claude-deepseek"
 model = "deepseek-flash[1m]"
 reasoning = "max"
 timeout_seconds = 1800
 ```
 
-The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Reviewer A also has an OpenCode `steps = 96` ceiling as a separate cost/runaway-loop guard: once the agent reaches that model-step budget, OpenCode removes tools and asks for a final text response instead of allowing unbounded tool iteration. Reviewer A still receives a larger wall-clock ceiling because legitimate repository inspection can be slow. The `[reviewers.grok]` table name is retained as a backward-compatible internal configuration key; the default model is GLM-5.3 Flash.
+The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Both reviewers use the same deterministic Claude Code adapter contract (`Read`, `Glob`, `Grep`, JSON schema), while provider/model isolation is handled by their configured launcher executable. The Reviewer A configuration key is `[reviewers.glm]`; the historical `grok` name is only recognized when resuming old run artifacts created before the rename.
 
 If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
 
 Cross-check ledger updates are applied transactionally. New findings receive stable IDs first; `REFINE` and `DUPLICATE_OF` relations are resolved to canonical targets before any ledger mutation is committed. Duplicate/superseded chains are flattened, cycles are rejected deterministically, and adjudication array order does not change the resulting ledger. A relation failure leaves the previous ledger unchanged.
 
-Use CLI/provider-native authentication. Do not put API keys or access tokens in this configuration file.
+Use provider-specific launcher authentication. Do not put API keys or access tokens in this configuration file. A launcher can inject provider environment variables and then `exec` the same Claude Code binary; for example, `claude-glm` can target OpenRouter while `claude-deepseek` targets DeepSeek official.
 
-If `claude` or `opencode` is not on `PATH`, set `executable` to an explicit path such as `~/.local/bin/claude`.
+If a launcher is not on `PATH`, set `executable` to its explicit path, such as `~/.local/bin/claude-glm` or `~/.local/bin/claude-deepseek`.
 
 ## Verify installation
 
@@ -203,7 +202,7 @@ python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
 
 Resume is detached by default and keeps the same `job_id`. It replays the normal review state machine from durable artifacts: an already validated `result.json` is reused, an exit-0 `raw.stdout` is recovered without another model call when it now parses and validates, and only a reviewer slot with no reusable checkpoint is called again. This means a failure after several expensive calls does not throw those successful calls away.
 
-Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if the reviewer adapter, model, or reasoning configuration no longer matches the original run. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, and actual rerun calls.
+Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if reviewer model/reasoning changed. Adapter changes also fail closed except for the audited legacy Reviewer-A OpenCode-to-Claude migration of the same canonical GLM model; that migration forces a fresh preflight and is recorded in resume metadata. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, actual rerun calls, and any recorded reviewer migration.
 
 If the exact job id was lost, `status` without `--job` resolves the most recent detached job. `--dry-run` remains synchronous, and `--foreground` is available only for explicit debugging/manual synchronous execution. The older `--detach` flag remains accepted as a compatibility alias for the default behavior.
 
@@ -231,7 +230,7 @@ This repository intentionally contains **no API keys, access tokens, passwords, 
 
 The Skill:
 
-- relies on existing Claude Code/OpenCode authentication;
+- relies on provider-isolated Claude Code launchers/authentication;
 - does not copy provider credentials into run artifacts;
 - disables Skill delegation for reviewer workers;
 - constrains reviewer workers to read/search capabilities;
@@ -262,7 +261,7 @@ Run the test suite:
 python3 -m unittest discover -s skills/loop-review/tests -v
 ```
 
-The current suite covers controller flow, read-only adapters, schema validation, `AGENTS.md` rule handling, issue-ledger transitions, failure auditing, and OpenCode/Claude adapter behavior.
+The current suite covers controller flow, provider-isolated Claude reviewer configuration, schema validation, `AGENTS.md` rule handling, issue-ledger transitions, checkpoint resume, legacy artifact migration, and failure auditing.
 
 ## Updating
 
@@ -275,4 +274,4 @@ npx skills update
 
 ## Status
 
-The Skill is functional and has been exercised with real Claude Code and OpenCode reviewer calls. Before making this repository public, choose and add an explicit open-source license.
+The Skill is functional and has been exercised with real Claude Code reviewer calls against both OpenRouter/GLM and DeepSeek official. Before making this repository public, choose and add an explicit open-source license.
