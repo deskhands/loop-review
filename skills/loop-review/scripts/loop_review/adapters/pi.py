@@ -57,6 +57,11 @@ class PiAdapter(ReviewerAdapter):
         }
         provider: Optional[str] = None
         model: Optional[str] = None
+        last_assistant_stop_reason: Optional[str] = None
+        last_assistant_error: Optional[str] = None
+        retry_exhausted = False
+        retry_final_error: Optional[str] = None
+        provider_errors: List[str] = []
 
         for raw in stdout.splitlines():
             if not raw.strip():
@@ -84,6 +89,12 @@ class PiAdapter(ReviewerAdapter):
                     continue
                 provider = str(message.get("provider") or provider or "")
                 model = str(message.get("model") or model or "")
+                stop_reason = message.get("stopReason")
+                error_message = message.get("errorMessage")
+                last_assistant_stop_reason = str(stop_reason) if stop_reason is not None else None
+                last_assistant_error = str(error_message) if error_message is not None else None
+                if last_assistant_stop_reason == "error" and last_assistant_error:
+                    provider_errors.append(last_assistant_error)
                 usage = message.get("usage")
                 if isinstance(usage, dict):
                     for key in ("input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"):
@@ -104,6 +115,13 @@ class PiAdapter(ReviewerAdapter):
                     ]
                     if texts:
                         final_text = "".join(texts)
+            elif event_type == "auto_retry_end":
+                if event.get("success") is False:
+                    retry_exhausted = True
+                    retry_final_error = str(event.get("finalError") or "") or None
+                elif event.get("success") is True:
+                    retry_exhausted = False
+                    retry_final_error = None
 
         repeats = Counter(tool_calls)
         stats = {
@@ -113,11 +131,27 @@ class PiAdapter(ReviewerAdapter):
             "usage": totals,
             "provider": provider,
             "model": model,
+            "last_assistant_stop_reason": last_assistant_stop_reason,
+            "last_assistant_error": last_assistant_error,
+            "retry_exhausted": retry_exhausted,
+            "retry_final_error": retry_final_error,
+            "provider_errors": provider_errors,
         }
         return final_text, stats
 
     def _extract(self, stdout: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         final_text, stats = self._events(stdout)
+        if stats["retry_exhausted"] or stats["last_assistant_stop_reason"] == "error":
+            message = (
+                stats["retry_final_error"]
+                or stats["last_assistant_error"]
+                or "provider request failed"
+            )
+            raise LoopReviewError(
+                "PROVIDER_REQUEST_FAILED",
+                f"Pi provider request failed: {message}",
+                {"stats": stats},
+            )
         if not final_text:
             raise LoopReviewError(
                 "INVALID_JSON",

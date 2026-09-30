@@ -12,6 +12,89 @@ from loop_review.adapters.pi import PiAdapter
 from loop_review.util import LoopReviewError
 
 
+def provider_failure_stream():
+    lines = [
+        {"type": "agent_start"},
+        {"type": "turn_start"},
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.3-flash",
+                "stopReason": "error",
+                "errorMessage": "terminated",
+                "content": [{"type": "text", "text": '{"schema_version":"1.0","summary":"partial'}],
+                "usage": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "reasoning": 0,
+                    "totalTokens": 0,
+                    "cost": {"total": 0},
+                },
+            },
+        },
+        {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000, "errorMessage": "terminated"},
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.3-flash",
+                "stopReason": "error",
+                "errorMessage": "Request timed out.",
+                "content": [],
+                "usage": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "reasoning": 0,
+                    "totalTokens": 0,
+                    "cost": {"total": 0},
+                },
+            },
+        },
+        {"type": "auto_retry_end", "success": False, "attempt": 3, "finalError": "Request timed out."},
+        {"type": "agent_settled"},
+    ]
+    return "\n".join(json.dumps(x) for x in lines) + "\n"
+
+
+def recovered_retry_stream(result):
+    lines = [
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.3-flash",
+                "stopReason": "error",
+                "errorMessage": "Connection error.",
+                "content": [],
+                "usage": {"cost": {"total": 0}},
+            },
+        },
+        {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000, "errorMessage": "Connection error."},
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.3-flash",
+                "stopReason": "stop",
+                "content": [{"type": "text", "text": json.dumps(result)}],
+                "usage": {"cost": {"total": 0.01}},
+            },
+        },
+        {"type": "auto_retry_end", "success": True, "attempt": 1},
+        {"type": "agent_settled"},
+    ]
+    return "\n".join(json.dumps(x) for x in lines) + "\n"
+
+
 def event_stream(result, *, repeated=False):
     lines = [
         {"type": "agent_start"},
@@ -127,6 +210,48 @@ class PiAdapterTests(unittest.TestCase):
         lines[-2] = json.dumps(event)
         with self.assertRaises(LoopReviewError):
             self.adapter._extract("\n".join(lines) + "\n")
+
+    def test_parser_reports_retry_exhaustion_as_provider_failure(self):
+        with self.assertRaises(LoopReviewError) as caught:
+            self.adapter._extract(provider_failure_stream())
+        self.assertEqual(caught.exception.code, "PROVIDER_REQUEST_FAILED")
+        stats = caught.exception.details["stats"]
+        self.assertTrue(stats["retry_exhausted"])
+        self.assertEqual(stats["retry_final_error"], "Request timed out.")
+        self.assertEqual(stats["last_assistant_stop_reason"], "error")
+        self.assertEqual(stats["last_assistant_error"], "Request timed out.")
+        self.assertEqual(stats["provider_errors"], ["terminated", "Request timed out."])
+
+    def test_parser_accepts_success_after_transient_provider_error(self):
+        result = {"ok": True}
+        parsed, stats = self.adapter._extract(recovered_retry_stream(result))
+        self.assertEqual(parsed, result)
+        self.assertFalse(stats["retry_exhausted"])
+        self.assertEqual(stats["last_assistant_stop_reason"], "stop")
+        self.assertEqual(stats["provider_errors"], ["Connection error."])
+
+    def test_review_exit_zero_with_retry_exhaustion_is_provider_failure(self):
+        def fake_run(argv, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=provider_failure_stream(),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            out = td / "out"
+            with patch("loop_review.adapters.pi.run_cmd", side_effect=fake_run):
+                with self.assertRaises(LoopReviewError) as caught:
+                    self.adapter.review("prompt", td, td / "run", out)
+
+            self.assertEqual(caught.exception.code, "PROVIDER_REQUEST_FAILED")
+            meta = json.loads((out / "meta.json").read_text())
+            error = json.loads((out / "error.json").read_text())
+            self.assertEqual(meta["status"], "FAILED")
+            self.assertTrue(meta["retry_exhausted"])
+            self.assertEqual(meta["retry_final_error"], "Request timed out.")
+            self.assertEqual(error["code"], "PROVIDER_REQUEST_FAILED")
 
     def test_timeout_persists_partial_event_stats(self):
         partial = event_stream({"ok": True}, repeated=True)
