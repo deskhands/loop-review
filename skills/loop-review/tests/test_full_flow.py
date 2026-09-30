@@ -1,597 +1,134 @@
 import json
-import subprocess
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 
-SKILL = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SKILL / "scripts"))
-
-from loop_review.config import load_config
-from loop_review.controller import LoopReviewController
+from support import ReviewCase, FakeReviewer, finding
 from loop_review.util import LoopReviewError
 
 
-def empty_result(policy_path):
-    return {
-        "schema_version": "1.0",
-        "summary": "No material issues found.",
-        "policies_checked": [{"path": policy_path, "status": "CHECKED", "violation_local_ids": []}],
-        "adjudications": [],
-        "findings": [],
-        "open_questions": [],
-        "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
-    }
+class FullFlowTests(ReviewCase):
+    def test_empty_complete_discovery_finishes_after_two_tasks(self):
+        state = self.controller.run(self.invocation())
+        self.assertEqual(state['status'], 'FROZEN_PASS')
+        self.assertEqual(state['review_calls'], 2)
+        self.assertEqual(len(self.a.prompts), 1)
+        self.assertEqual(len(self.b.prompts), 1)
+        directory = Path(state['run_dir'])
+        self.assertIn('运行时迁移', str(directory))
+        self.assertIn('初版方案审核', directory.name)
+        self.assertEqual(state['run_id'], state['job_id'])
+        self.assertIn('report.md', (directory.parent / 'README.md').read_text())
+        self.assertTrue((directory / 'report.md').is_file())
 
+    def test_two_discoveries_are_cross_verified_in_four_tasks(self):
+        self.a.defect = self.b.defect = True
+        state = self.controller.run(self.invocation())
+        self.assertEqual(state['status'], 'FROZEN_CHANGES_REQUIRED')
+        self.assertEqual(state['review_calls'], 4)
+        output = json.loads((Path(state['run_dir']) / 'result.json').read_text())
+        self.assertEqual([item['status'] for item in output['findings']], ['ACCEPTED', 'ACCEPTED'])
+        self.assertNotIn('Leaked resource', self.a.prompts[0])
+        self.assertNotIn('Leaked resource', self.b.prompts[0])
 
-class FakeAdapter:
-    def __init__(self, name, policy_path):
-        self.name = name
-        self.policy_path = policy_path
-        self.calls = 0
+    def test_verification_new_issue_never_starts_another_cycle(self):
+        self.a.defect = self.b.defect = self.a.new = True
+        state = self.controller.run(self.invocation())
+        self.assertEqual(state['status'], 'UNRESOLVED_MAX_CYCLES')
+        self.assertEqual(state['review_calls'], 4)
+        output = json.loads((Path(state['run_dir']) / 'result.json').read_text())
+        self.assertEqual(output['findings'][-1]['status'], 'UNVERIFIED')
 
-    def healthcheck(self, cwd):
-        return {"ok": True, "version": "fake", "model": self.name, "reasoning": "test"}
+    def test_disagreement_is_a_terminal_result(self):
+        self.a.defect = self.b.defect = True
+        self.a.vote = 'REJECT'
+        state = self.controller.run(self.invocation())
+        self.assertEqual(state['status'], 'FROZEN_DISPUTED')
+        self.assertEqual(state['review_calls'], 4)
 
-    def parse_saved_output(self, stdout):
-        return json.loads(stdout)
+    def test_open_question_prevents_empty_pass(self):
+        self.a.questions = ['Required caller context is missing.']
+        self.assertEqual(self.controller.run(self.invocation())['status'], 'UNRESOLVED_MAX_CYCLES')
 
-    def _success(self, out_dir):
-        result = empty_result(self.policy_path)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "raw.stdout").write_text(json.dumps(result))
-        (out_dir / "raw.stderr").write_text("")
-        return {
-            "result": result,
-            "meta": {
-                "status": "OK",
-                "duration_ms": 1,
-                "exit_code": 0,
-                "model": self.name,
-                "reasoning": "test",
-                "timeout_seconds": 1,
-            },
-        }
+    def test_failure_preserves_peer_finding_and_resume_reuses_it(self):
+        self.a.defect = True
+        self.b.fail = True
+        directory = self.failed_run()
+        report = (directory / 'report.md').read_text()
+        self.assertIn('Leaked resource', report)
+        self.assertIn('partial evidence', report)
+        self.b.fail = False
+        state = self.controller.resume(directory)
+        self.assertEqual(state['status'], 'FROZEN_CHANGES_REQUIRED')
+        self.assertEqual(len(self.a.prompts), 1)
+        self.assertEqual(len(self.b.prompts), 3)  # Failed discovery, recovery, verification.
+        self.assertEqual(state['review_calls'], 4)
 
-    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
-        self.calls += 1
-        return self._success(out_dir)
+    def test_resume_preserves_total_attempt_limit(self):
+        self.b.fail = True
+        directory = self.failed_run()
+        for _ in range(4):
+            with self.assertRaises(LoopReviewError):
+                self.controller.resume(directory)
+        with self.assertRaises(LoopReviewError) as caught:
+            self.controller.resume(directory)
+        self.assertEqual(caught.exception.code, 'RUN_BUDGET_EXCEEDED')
+        state = json.loads((directory / 'status.json').read_text())
+        self.assertEqual(state['review_calls'], 6)
+        self.assertEqual(len(self.a.prompts), 1)
 
+    def test_token_budget_is_kept_across_resume(self):
+        self.controller.config['limits']['max_total_tokens'] = 100
+        self.a.tokens, self.b.tokens = 60, 60
+        directory = self.failed_run()
+        calls = len(self.a.prompts) + len(self.b.prompts)
+        with self.assertRaises(LoopReviewError) as caught:
+            self.controller.resume(directory)
+        self.assertEqual(caught.exception.code, 'RUN_BUDGET_EXCEEDED')
+        self.assertEqual(len(self.a.prompts) + len(self.b.prompts), calls)
 
-class TimeoutAdapter(FakeAdapter):
-    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
-        self.calls += 1
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "raw.stdout").write_text("partial")
-        (out_dir / "raw.stderr").write_text("")
-        (out_dir / "meta.json").write_text(json.dumps({
-            "status": "TIMEOUT",
-            "duration_ms": 1000,
-            "exit_code": None,
-            "model": self.name,
-            "reasoning": "test",
-            "timeout_seconds": 1,
-        }))
-        (out_dir / "error.json").write_text(json.dumps({
-            "code": "TIMEOUT",
-            "message": "fake timeout",
-            "timeout_seconds": 1,
-        }))
-        raise LoopReviewError("TIMEOUT", "fake timeout", {"timeout_seconds": 1})
+    def test_input_drift_and_model_change_fail_closed(self):
+        self.b.fail = True
+        directory = self.failed_run()
+        self.controller.config['reviewers']['qwen']['model'] = 'another-model'
+        with self.assertRaises(LoopReviewError) as caught:
+            self.controller.resume(directory)
+        self.assertEqual(caught.exception.code, 'RESUME_CONFIG_CHANGED')
+        self.controller.config['reviewers']['qwen']['model'] = 'qwen/qwen3.8-flash'
+        (self.repo / 'design.md').write_text('Changed design.\n')
+        with self.assertRaises(LoopReviewError) as caught:
+            self.controller.resume(directory)
+        self.assertEqual(caught.exception.code, 'FAILED_INPUT_CHANGED')
 
+    def test_history_is_withheld_until_verification(self):
+        self.a.defect = True
+        previous = self.controller.run(self.invocation())
+        self.a.defect = False
+        (self.repo / 'design.md').write_text('Cleanup now guaranteed.\n')
+        self.a.vote = self.b.vote = 'REJECT'
+        self.a.prompts.clear()
+        self.b.prompts.clear()
+        state = self.controller.run(self.invocation(previous_run_id=previous['run_id'], title='修改方案复核'))
+        self.assertEqual(state['status'], 'FROZEN_PASS')
+        self.assertEqual(state['review_calls'], 4)
+        self.assertNotIn('Leaked resource', self.a.prompts[0])
+        self.assertIn('Leaked resource', self.a.prompts[1])
+        self.assertEqual(Path(previous['run_dir']).parent, Path(state['run_dir']).parent)
+        output = json.loads((Path(state['run_dir']) / 'result.json').read_text())
+        self.assertEqual(output['findings'][0]['status'], 'RESOLVED')
 
-class FailOnCallAdapter(FakeAdapter):
-    def __init__(self, name, policy_path, fail_on):
-        super().__init__(name, policy_path)
-        self.fail_on = fail_on
+    def test_fixes_scope_only_checks_specified_claims(self):
+        self.a.defect = True
+        previous = self.controller.run(self.invocation())
+        self.a.vote = self.b.vote = 'REJECT'
+        state = self.controller.run(self.invocation(previous_run_id=previous['run_id'], scope='fixes'))
+        self.assertEqual(state['status'], 'FIXES_VERIFIED')
+        self.assertEqual(state['review_calls'], 2)
+        self.assertIn('not a full review', (Path(state['run_dir']) / 'report.md').read_text())
 
-    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
-        self.calls += 1
-        if self.calls != self.fail_on:
-            return self._success(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "raw.stdout").write_text("partial")
-        (out_dir / "raw.stderr").write_text("")
-        (out_dir / "meta.json").write_text(json.dumps({
-            "status": "TIMEOUT",
-            "duration_ms": 1000,
-            "exit_code": None,
-            "model": self.name,
-            "reasoning": "test",
-            "timeout_seconds": 1,
-        }))
-        (out_dir / "error.json").write_text(json.dumps({
-            "code": "TIMEOUT",
-            "message": "fake timeout",
-        }))
-        raise LoopReviewError("TIMEOUT", "fake timeout", {"timeout_seconds": 1})
-
-
-class RecoverableInvalidAdapter(FakeAdapter):
-    def __init__(self, name, policy_path, fail_on):
-        super().__init__(name, policy_path)
-        self.fail_on = fail_on
-
-    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
-        self.calls += 1
-        if self.calls != self.fail_on:
-            return self._success(out_dir)
-        result = empty_result(self.policy_path)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "raw.stdout").write_text(json.dumps(result))
-        (out_dir / "raw.stderr").write_text("")
-        (out_dir / "meta.json").write_text(json.dumps({
-            "status": "FAILED",
-            "duration_ms": 1,
-            "exit_code": 0,
-            "model": self.name,
-            "reasoning": "test",
-            "timeout_seconds": 1,
-        }))
-        (out_dir / "error.json").write_text(json.dumps({
-            "code": "INVALID_JSON",
-            "message": "simulated parser failure",
-        }))
-        raise LoopReviewError("INVALID_JSON", "simulated parser failure")
-
-
-class NewFindingThenAcceptedAdapter(FakeAdapter):
-    def _emit(self, out_dir, result):
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "raw.stdout").write_text(json.dumps(result))
-        (out_dir / "raw.stderr").write_text("")
-        return {
-            "result": result,
-            "meta": {
-                "status": "OK",
-                "duration_ms": 1,
-                "exit_code": 0,
-                "model": self.name,
-                "reasoning": "test",
-                "timeout_seconds": 1,
-            },
-        }
-
-    def review(self, prompt, cwd, run_dir, out_dir, read_dirs=None):
-        self.calls += 1
-        result = empty_result(self.policy_path)
-
-        if self.calls == 2 and self.name == "qwen":
-            result["summary"] = "Found one non-blocking issue."
-            result["findings"] = [{
-                "local_id": "N1",
-                "severity": "LOW",
-                "blocking": False,
-                "category": "correctness",
-                "title": "Cycle-local finding",
-                "claim": "A material but non-blocking issue exists.",
-                "evidence": [{
-                    "path": "design.md",
-                    "line_start": 1,
-                    "line_end": 1,
-                    "description": "Primary evidence.",
-                }],
-                "rule_refs": [],
-                "rationale": "The first reviewer found it during cross-check.",
-                "required_change": "Clarify the design.",
-            }]
-            result["freeze_assessment"] = {
-                "can_freeze": False,
-                "blocking_local_ids": [],
-            }
-        elif self.calls == 2 and self.name == "deepseek":
-            result["summary"] = "Accepted the cycle-one finding."
-            result["adjudications"] = [{
-                "finding_id": "F001",
-                "decision": "ACCEPT",
-                "rationale": "Verified independently.",
-                "evidence": [{
-                    "path": "design.md",
-                    "line_start": 1,
-                    "line_end": 1,
-                    "description": "Confirmed evidence.",
-                }],
-                "replacement_local_id": None,
-                "duplicate_of": None,
-            }]
-        elif self.calls == 3 and self.name == "deepseek":
-            result["summary"] = "Found one final-cycle issue."
-            result["findings"] = [{
-                "local_id": "N2",
-                "severity": "LOW",
-                "blocking": False,
-                "category": "correctness",
-                "title": "Final-cycle finding",
-                "claim": "A second non-blocking issue exists.",
-                "evidence": [{
-                    "path": "design.md",
-                    "line_start": 2,
-                    "line_end": 2,
-                    "description": "Second-cycle evidence.",
-                }],
-                "rule_refs": [],
-                "rationale": "The reverse-order reviewer found it in the final cycle.",
-                "required_change": "Clarify the second point.",
-            }]
-            result["freeze_assessment"] = {
-                "can_freeze": False,
-                "blocking_local_ids": [],
-            }
-        elif self.calls == 3 and self.name == "qwen":
-            result["summary"] = "Accepted the final-cycle finding."
-            result["adjudications"] = [{
-                "finding_id": "F002",
-                "decision": "ACCEPT",
-                "rationale": "Verified independently in the final cycle.",
-                "evidence": [{
-                    "path": "design.md",
-                    "line_start": 2,
-                    "line_end": 2,
-                    "description": "Confirmed second-cycle evidence.",
-                }],
-                "replacement_local_id": None,
-                "duplicate_of": None,
-            }]
-
-        return self._emit(out_dir, result)
-
-
-def make_case(td):
-    repo = td / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    rule = repo / "AGENTS.md"
-    rule.write_text("Keep it simple.\n")
-    target = repo / "design.md"
-    target.write_text("# Design\nUse the existing path.\n")
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-
-    cfg_path = td / "config.toml"
-    cfg_path.write_text(
-        'version = 1\n'
-        '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-        '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-        '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
-        '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-    )
-    invocation = {
-        "schema_version": "1.0",
-        "mode": "design",
-        "repo": str(repo),
-        "request": {"kind": "text", "content": "Review it."},
-        "target": {"kind": "file", "path": str(target)},
-    }
-    inv = td / "invocation.json"
-    inv.write_text(json.dumps(invocation))
-    return repo, rule, target, cfg_path, inv
-
-
-class FullFlowTests(unittest.TestCase):
-    def test_complete_design_pass_flow(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo = td / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-            rule = repo / "AGENTS.md"
-            rule.write_text("Keep it simple.\n")
-            target = repo / "design.md"
-            target.write_text("# Design\nUse the existing path.\n")
-            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            controller.reviewers = {
-                "qwen": FakeAdapter("qwen", str(rule.resolve())),
-                "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
-            }
-
-            invocation = {
-                "schema_version": "1.0",
-                "mode": "design",
-                "repo": str(repo),
-                "request": {"kind": "text", "content": "Review it."},
-                "target": {"kind": "file", "path": str(target)},
-            }
-            inv = td / "invocation.json"
-            inv.write_text(json.dumps(invocation))
-
-            result = controller.run(inv)
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["review_calls"], 4)
-            self.assertEqual(result["cycles"], 1)
-            self.assertTrue(Path(result["review_path"]).is_file())
-            self.assertEqual(controller.reviewers["qwen"].calls, 2)
-            self.assertEqual(controller.reviewers["deepseek"].calls, 2)
-
-    def test_final_cycle_can_freeze_when_new_findings_are_fully_adjudicated(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            qwen = NewFindingThenAcceptedAdapter("qwen", str(rule.resolve()))
-            deepseek = NewFindingThenAcceptedAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {"qwen": qwen, "deepseek": deepseek}
-
-            result = controller.run(inv)
-
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["cycles"], 2)
-            self.assertEqual(result["review_calls"], 6)
-            self.assertEqual(qwen.calls, 3)
-            self.assertEqual(deepseek.calls, 3)
-
-            run_dir = Path(result["run_dir"])
-            ledger = json.loads((run_dir / "state" / "issue-ledger.json").read_text())
-            self.assertEqual(ledger["findings"]["F001"]["status"], "ACCEPTED")
-            self.assertEqual(ledger["findings"]["F002"]["status"], "ACCEPTED")
-
-    def test_discovery_failure_preserves_peer_result_and_counts_both_attempts(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo = td / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-            rule = repo / "AGENTS.md"
-            rule.write_text("Keep it simple.\n")
-            target = repo / "design.md"
-            target.write_text("# Design\nUse the existing path.\n")
-            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            controller.reviewers = {
-                "qwen": TimeoutAdapter("qwen", str(rule.resolve())),
-                "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
-            }
-
-            invocation = {
-                "schema_version": "1.0",
-                "mode": "design",
-                "repo": str(repo),
-                "request": {"kind": "text", "content": "Review it."},
-                "target": {"kind": "file", "path": str(target)},
-            }
-            inv = td / "invocation.json"
-            inv.write_text(json.dumps(invocation))
-
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            self.assertEqual(caught.exception.code, "TIMEOUT")
-            run_dir = Path(caught.exception.details["run_dir"])
-            state = json.loads((run_dir / "state" / "state.json").read_text())
-            self.assertEqual(state["review_calls"], 2)
-            self.assertTrue((run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").is_file())
-            self.assertTrue((run_dir / "rounds" / "00-discovery" / "deepseek" / "meta.json").is_file())
-            self.assertTrue((run_dir / "rounds" / "00-discovery" / "qwen" / "error.json").is_file())
-
-
-    def test_resume_reuses_successful_discovery_and_reruns_only_missing_slots(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": TimeoutAdapter("qwen", str(rule.resolve())),
-                "deepseek": deepseek,
-            }
-
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            run_dir = Path(caught.exception.details["run_dir"])
-            saved_peer = (run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").read_text()
-
-            resumed_qwen = FakeAdapter("qwen", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": resumed_qwen,
-                "deepseek": deepseek,
-            }
-            result = controller.resume(run_dir)
-
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["review_calls"], 5)
-            self.assertEqual(result["resume"]["reused_results"], 1)
-            self.assertEqual(result["resume"]["recovered_from_raw"], 0)
-            self.assertEqual(result["resume"]["rerun_calls"], 3)
-            self.assertEqual(
-                (run_dir / "rounds" / "00-discovery" / "deepseek" / "result.json").read_text(),
-                saved_peer,
-            )
-            self.assertEqual(resumed_qwen.calls, 2)
-            self.assertEqual(deepseek.calls, 2)
-
-    def test_resume_crosscheck_failure_reruns_only_failed_slot(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            qwen = FakeAdapter("qwen", str(rule.resolve()))
-            deepseek = FailOnCallAdapter("deepseek", str(rule.resolve()), fail_on=2)
-            controller.reviewers = {"qwen": qwen, "deepseek": deepseek}
-
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            self.assertEqual(caught.exception.code, "TIMEOUT")
-            run_dir = Path(caught.exception.details["run_dir"])
-            self.assertEqual(qwen.calls, 2)
-            self.assertEqual(deepseek.calls, 2)
-
-            resumed_deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            resumed_qwen = FakeAdapter("qwen", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": resumed_qwen,
-                "deepseek": resumed_deepseek,
-            }
-            result = controller.resume(run_dir)
-
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["review_calls"], 5)
-            self.assertEqual(result["resume"]["reused_results"], 3)
-            self.assertEqual(result["resume"]["recovered_from_raw"], 0)
-            self.assertEqual(result["resume"]["rerun_calls"], 1)
-            self.assertEqual(resumed_qwen.calls, 0)
-            self.assertEqual(resumed_deepseek.calls, 1)
-
-    def test_resume_recovers_valid_raw_without_model_call(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            qwen = RecoverableInvalidAdapter("qwen", str(rule.resolve()), fail_on=2)
-            deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {"qwen": qwen, "deepseek": deepseek}
-
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            self.assertEqual(caught.exception.code, "INVALID_JSON")
-            run_dir = Path(caught.exception.details["run_dir"])
-            before_qwen = qwen.calls
-            before_deepseek = deepseek.calls
-
-            result = controller.resume(run_dir)
-
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["review_calls"], 4)
-            self.assertEqual(result["resume"]["reused_results"], 2)
-            self.assertEqual(result["resume"]["recovered_from_raw"], 1)
-            self.assertEqual(result["resume"]["rerun_calls"], 1)
-            self.assertEqual(qwen.calls, before_qwen)
-            self.assertEqual(deepseek.calls, before_deepseek + 1)
-            recovered_meta = json.loads(
-                (run_dir / "rounds" / "01-cross-check" / "qwen" / "meta.json").read_text()
-            )
-            self.assertEqual(recovered_meta["status"], "RECOVERED_FROM_RAW")
-
-    def test_resume_refuses_input_drift_without_model_calls(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, target, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": TimeoutAdapter("qwen", str(rule.resolve())),
-                "deepseek": deepseek,
-            }
-
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            run_dir = Path(caught.exception.details["run_dir"])
-            target.write_text("# Design\nChanged after failure.\n")
-            resumed_qwen = FakeAdapter("qwen", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": resumed_qwen,
-                "deepseek": deepseek,
-            }
-
-            with self.assertRaises(LoopReviewError) as resumed:
-                controller.resume(run_dir)
-            self.assertEqual(resumed.exception.code, "FAILED_INPUT_CHANGED")
-            self.assertEqual(resumed_qwen.calls, 0)
-            self.assertEqual(deepseek.calls, 1)
-
-
-    def test_resume_refuses_reviewer_config_change(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            controller.reviewers = {
-                "qwen": TimeoutAdapter("qwen", str(rule.resolve())),
-                "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
-            }
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            run_dir = Path(caught.exception.details["run_dir"])
-
-            changed = load_config(cfg_path)
-            changed["reviewers"]["qwen"]["model"] = "different-model"
-            changed_controller = LoopReviewController(changed, SKILL)
-            changed_controller.reviewers = {
-                "qwen": FakeAdapter("qwen", str(rule.resolve())),
-                "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
-            }
-            with self.assertRaises(LoopReviewError) as resumed:
-                changed_controller.resume(run_dir)
-            self.assertEqual(resumed.exception.code, "RESUME_CONFIG_CHANGED")
-            self.assertEqual(changed_controller.reviewers["qwen"].calls, 0)
-            self.assertEqual(changed_controller.reviewers["deepseek"].calls, 0)
-
-    def test_resume_refuses_terminal_success(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, rule, _, cfg_path, inv = make_case(td)
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            controller.reviewers = {
-                "qwen": FakeAdapter("qwen", str(rule.resolve())),
-                "deepseek": FakeAdapter("deepseek", str(rule.resolve())),
-            }
-            result = controller.run(inv)
-            with self.assertRaises(LoopReviewError) as resumed:
-                controller.resume(Path(result["run_dir"]))
-            self.assertEqual(resumed.exception.code, "RESUME_NOT_SUPPORTED")
-
-
-    def test_resume_supports_code_working_tree_target(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo, rule, target, cfg_path, inv = make_case(td)
-            target.write_text("# Design\nChanged working tree.\n")
-            inv.write_text(json.dumps({
-                "schema_version": "1.0",
-                "mode": "code",
-                "repo": str(repo),
-                "request": {"kind": "text", "content": "Review the working tree."},
-                "target": {"kind": "working-tree"},
-            }))
-
-            controller = LoopReviewController(load_config(cfg_path), SKILL)
-            deepseek = FakeAdapter("deepseek", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": TimeoutAdapter("qwen", str(rule.resolve())),
-                "deepseek": deepseek,
-            }
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            run_dir = Path(caught.exception.details["run_dir"])
-
-            resumed_qwen = FakeAdapter("qwen", str(rule.resolve()))
-            controller.reviewers = {
-                "qwen": resumed_qwen,
-                "deepseek": deepseek,
-            }
-            result = controller.resume(run_dir)
-
-            self.assertEqual(result["status"], "FROZEN_PASS")
-            self.assertEqual(result["resume"]["reused_results"], 1)
-            self.assertEqual(result["resume"]["rerun_calls"], 3)
-            self.assertEqual(resumed_qwen.calls, 2)
-            self.assertEqual(deepseek.calls, 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_shared_task_directory_does_not_implicitly_load_history(self):
+        self.a.defect = True
+        self.controller.run(self.invocation())
+        self.a.defect = False
+        self.a.prompts.clear()
+        state = self.controller.run(self.invocation(title='独立复核'))
+        self.assertEqual(state['review_calls'], 2)
+        self.assertNotIn('Leaked resource', self.a.prompts[0])

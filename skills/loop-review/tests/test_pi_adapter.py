@@ -165,7 +165,7 @@ class PiAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             out = td / "out"
-            with patch("loop_review.adapters.pi.run_cmd", side_effect=fake_run):
+            with patch("loop_review.adapters.pi.stream_review", side_effect=fake_run):
                 response = self.adapter.review("prompt", td, td / "run", out)
 
         argv = captured["argv"]
@@ -241,7 +241,7 @@ class PiAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             out = td / "out"
-            with patch("loop_review.adapters.pi.run_cmd", side_effect=fake_run):
+            with patch("loop_review.adapters.pi.stream_review", side_effect=fake_run):
                 with self.assertRaises(LoopReviewError) as caught:
                     self.adapter.review("prompt", td, td / "run", out)
 
@@ -269,7 +269,7 @@ class PiAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             out = td / "out"
-            with patch("loop_review.adapters.pi.run_cmd", side_effect=error):
+            with patch("loop_review.adapters.pi.stream_review", side_effect=error):
                 with self.assertRaises(LoopReviewError):
                     adapter.review("prompt", td, td / "run", out)
 

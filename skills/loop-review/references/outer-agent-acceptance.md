@@ -22,14 +22,13 @@ Do not ask either reviewer worker to make this acceptance decision.
 Always inspect:
 
 1. the original user request available in the outer conversation;
-2. `final/status.json`;
-3. `final/review.md`.
+2. `status.json`;
+3. `report.md`.
 
 Inspect these when needed to resolve doubt, disagreement, missing evidence, or apparent misunderstanding:
 
-- `final/review.json`
-- `state/issue-ledger.json`
-- individual `rounds/**/review.md` or `result.json`
+- `result.json`
+- individual `audit/**/result.json`
 - the original target and applicable `AGENTS.md`
 
 The outer agent should not summarize away material user constraints before making the acceptance decision.
@@ -82,9 +81,11 @@ Do not reject a review because it returned `FROZEN_CHANGES_REQUIRED`; that state
 
 Do not equate reviewer agreement with correctness. Verify material conclusions against the original request and evidence.
 
-Do not create a second hidden review loop in the outer layer. The acceptance pass should be bounded: inspect the final result first, drill into ledger/round artifacts only when a concrete doubt requires it.
+Do not create a second hidden review loop in the outer layer. The acceptance pass should be bounded: inspect the final result first, drill into result/attempt artifacts only when a concrete doubt requires it.
 
-If the controller status is `FAILED`, do not assign one of the three acceptance statuses. Report the failure code and run directory instead.
+For `FIXES_VERIFIED`, explicitly accept only the specified fixes, not the entire target.
+
+If the controller status is `FAILED`, `CANCELED`, or `ORPHANED`, do not assign one of the three acceptance statuses. Report the failure code and run directory instead.
 
 ## User-facing report
 

@@ -1,126 +1,66 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from pathlib import Path
+from typing import Any, Dict
+from urllib.parse import quote
+
+LABELS = {
+    "INIT": "Preparing", "PREPARED": "Ready", "PREPARED_DRY_RUN": "Prepared (no model calls)",
+    "RESUMING": "Running: restoring checkpoints",
+    "DISCOVERY": "Running: independent discovery", "VERIFICATION": "Running: targeted verification",
+    "FROZEN_PASS": "Completed: no confirmed blocking findings",
+    "FROZEN_CHANGES_REQUIRED": "Completed: changes required",
+    "FROZEN_DISPUTED": "Completed: reviewer disagreement",
+    "UNRESOLVED_MAX_CYCLES": "Completed: unverified issues or open questions",
+    "FIXES_VERIFIED": "Completed: specified fixes verified (limited scope)",
+    "FAILED": "Incomplete: execution failed", "CANCELED": "Incomplete: canceled",
+    "ORPHANED": "Incomplete: controller process disappeared",
+}
 
 
-def _evidence_lines(evidence: Iterable[Dict[str, Any]]) -> List[str]:
-    out: List[str] = []
-    for ev in evidence:
-        loc = ev["path"]
-        if ev.get("line_start") is not None:
-            loc += f":{ev['line_start']}"
-            if ev.get("line_end") not in (None, ev.get("line_start")):
-                loc += f"-{ev['line_end']}"
-        out.append(f"- `{loc}` — {ev['description']}")
-    return out or ["- No line-specific evidence supplied."]
-
-
-def render_round(result: Dict[str, Any], stable_map: Dict[str, str]) -> str:
-    lines = ["# Review Result", "", "## Summary", "", result["summary"], "", "## Mandatory Policy Compliance", ""]
-    if result["policies_checked"]:
-        for p in result["policies_checked"]:
-            lines.append(f"- **{p['status']}** `{p['path']}`")
-    else:
-        lines.append("- No applicable AGENTS.md files.")
-    lines += ["", "## Findings", ""]
-    if not result["findings"]:
-        lines.append("No new findings.")
-    for f in result["findings"]:
-        sid = stable_map.get(f["local_id"], f["local_id"])
-        lines += [
-            f"### {sid} — [{f['severity']}] {f['title']}",
-            "",
-            f"Blocking: **{'yes' if f['blocking'] else 'no'}**  ",
-            f"Category: `{f['category']}`",
-            "",
-            "#### Finding", "",
-            f["claim"], "",
-            "#### Evidence", "",
-            *_evidence_lines(f["evidence"]),
-            "",
-        ]
-        if f["rule_refs"]:
-            lines += ["#### AGENTS.md rule", ""]
-            for ref in f["rule_refs"]:
-                lines.append(f"- `{ref['path']}` — {ref['description']}")
-            lines.append("")
-        lines += ["#### Why this matters", "", f["rationale"], "", "#### Required change", "", f["required_change"], ""]
-    lines += ["## Existing Finding Adjudication", ""]
-    if not result["adjudications"]:
-        lines.append("None.")
-    for a in result["adjudications"]:
-        extra = ""
-        if a["decision"] == "REFINE":
-            extra = f" → {stable_map.get(a.get('replacement_local_id') or '', a.get('replacement_local_id'))}"
-        elif a["decision"] == "DUPLICATE_OF":
-            extra = f" → {a.get('duplicate_of')}"
-        lines += [f"- **{a['finding_id']} — {a['decision']}**{extra}: {a['rationale']}"]
-    lines += ["", "## Open Questions", ""]
-    lines += [f"- {q}" for q in result["open_questions"]] or ["None."]
-    lines += [
-        "",
-        "## Freeze Assessment",
-        "",
-        f"Reviewer assessment: **{'can freeze' if result['freeze_assessment']['can_freeze'] else 'cannot freeze'}**",
-    ]
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_final(status: str, ledger: Dict[str, Any], summaries: List[str]) -> str:
-    accepted = [(fid, f) for fid, f in ledger["findings"].items() if f["status"] == "ACCEPTED"]
-    disputed = [(fid, f) for fid, f in ledger["findings"].items() if f["status"] == "DISPUTED"]
-    open_items = [(fid, f) for fid, f in ledger["findings"].items() if f["status"] == "OPEN"]
-    lines = [
-        "# Final Loop Review",
-        "",
-        f"**Status: {status}**",
-        "",
-        "## Summary",
-        "",
-    ]
-    if summaries:
-        lines.append(summaries[-1])
-    else:
-        lines.append("Review completed.")
-    lines += ["", "## Accepted Findings", ""]
-    if not accepted:
-        lines.append("None.")
-    for fid, item in accepted:
-        f = item["finding"]
-        lines += [
-            f"### {fid} — [{f['severity']}] {f['title']}",
-            "",
-            f"Blocking: **{'yes' if f['blocking'] else 'no'}**",
-            "",
-            f["claim"],
-            "",
-            "Evidence:",
-            *_evidence_lines(f["evidence"]),
-            "",
-            f"Required change: {f['required_change']}",
-            "",
-        ]
-    lines += ["## Disputed Findings", ""]
-    if not disputed:
-        lines.append("None.")
-    for fid, item in disputed:
-        lines += [f"- **{fid}** — {item['finding']['title']}"]
-        for reviewer, pos in sorted(item["positions"].items()):
-            lines.append(f"  - {reviewer}: {pos['decision']} — {pos.get('rationale','')}")
-    lines += ["", "## Unresolved Open Findings", ""]
-    if not open_items:
-        lines.append("None.")
-    for fid, item in open_items:
-        lines.append(f"- **{fid}** — {item['finding']['title']}")
-    lines += ["", "## Freeze Meaning", ""]
-    if status == "FROZEN_PASS":
-        lines.append("The review conclusion is frozen with no accepted blocking findings.")
-    elif status == "FROZEN_CHANGES_REQUIRED":
-        lines.append("The review conclusion is frozen; the reviewed target still requires changes.")
-    elif status == "FROZEN_DISPUTED":
-        lines.append("The review budget ended with unresolved reviewer disagreement.")
-    elif status == "UNRESOLVED_MAX_CYCLES":
-        lines.append("The review budget ended before the finding set stabilized.")
-    else:
-        lines.append("The review did not complete successfully.")
+def render_final(state: Dict[str, Any], result: Dict[str, Any]) -> str:
+    lines = [f"# {state['title']}", "", f"**{LABELS.get(state['status'], state['status'])}**", "",
+             f"Run: `{state['run_id']}` · Task: `{state['task_id']}` · Mode: `{state['mode']}`",
+             f"Scope: **{state['scope']}** · Updated: {state['updated_at']}", "",
+             f"Repository: `{state['repo']}`", ""]
+    if state['scope'] == 'fixes':
+        lines += ["This verifies specified historical claims only. It is not a full review of the current target.", ""]
+    if state.get('previous_run_id'):
+        lines += [f"Previous run: `{state['previous_run_id']}`. Historical claims were withheld from full-review discovery.", ""]
+    if state.get('failure_code'):
+        lines += [f"Failure: **{state['failure_code']}** — {state.get('message', '')}", "",
+                  "Available findings below are partial evidence, not a passing review.", ""]
+    lines += ["## Execution", "", f"Task attempts: {state['review_calls']} · Active time: {state['elapsed_seconds']:.1f}s", ""]
+    for key, progress in sorted(state.get('progress', {}).items()):
+        tokens = progress.get('total_tokens')
+        cost = progress.get('reported_cost')
+        lines.append(f"- {key}: {progress.get('status', 'RUNNING')}; turns {progress.get('turns', 0)}, "
+                     f"tools {progress.get('tool_calls', 0)}, tokens {tokens if tokens is not None else 'unknown'}, "
+                     f"CLI-reported cost {cost if cost is not None else 'unknown'}.")
+    lines += ["", "CLI cost estimates may not match provider billing. Cached tokens are included in known token totals.", "",
+              "## Findings", ""]
+    if not result.get('findings'):
+        lines.append("No findings recorded." if state['status'] in ('FAILED', 'CANCELED') else "No material findings reported.")
+    for item in result.get('findings', []):
+        finding = item['finding']
+        title = finding['title']
+        lines += [f"### {item['id']} — {item['status']} — {title}", "",
+                  f"Severity: {finding['severity']} · Blocking: {finding['blocking']}", "", finding['claim'], ""]
+        for evidence in finding['evidence']:
+            path = evidence['path']
+            if not Path(path).is_absolute():
+                path = str(Path(state['repo']) / path)
+            location = f"{path}:{evidence['line_start']}" if evidence['line_start'] else path
+            lines.append(f"- [{location}]({quote(location, safe='/:' )}): {evidence['description']}")
+        lines += ["", f"Required change: {finding['required_change']}", ""]
+        for reviewer, position in sorted(item.get('positions', {}).items()):
+            lines.append(f"- {reviewer}: {position['decision']} — {position['rationale']}")
+        if item.get('previous_id'):
+            lines.append(f"- Historical claim: {item['previous_id']}. RESOLVED requires source evidence from both reviewers.")
+        lines.append("")
+    lines += ["## Open questions", ""]
+    lines += [f"- {question}" for question in result.get('open_questions', [])] or ["None recorded."]
+    lines += ["", "## Audit", "", "[Machine result](result.json) · [Current status](status.json) · [Manifest](manifest.json)", "",
+              "Raw events and immutable attempts are under `audit/`. Reviewer agreement does not prove correctness; "
+              "the outer agent must check material conclusions against the original request."]
     return "\n".join(lines).rstrip() + "\n"

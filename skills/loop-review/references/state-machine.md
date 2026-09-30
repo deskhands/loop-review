@@ -1,52 +1,45 @@
-# State machine
+# State and recovery
 
-Flow:
+`INIT -> PREPARED -> DISCOVERY -> [VERIFICATION] -> terminal`
 
-`INIT -> NORMALIZE_INPUT -> DISCOVER_RULES -> FINGERPRINT -> PREFLIGHT -> DISCOVERY_PARALLEL -> BUILD_LEDGER -> CROSS_CHECK_1 -> [FREEZE | CROSS_CHECK_2] -> [FREEZE | DISPUTED | UNRESOLVED]`
+Fix-only scope skips discovery. No findings plus no open questions can complete
+without verification. Each verification checks only the other reviewer's claims
+and explicit historical claims. Essential new findings remain UNVERIFIED.
 
-Any infrastructure/protocol failure goes to `FAILED`.
+- FROZEN_PASS: complete full review with no confirmed blocking findings.
+- FROZEN_CHANGES_REQUIRED: confirmed blocking findings exist.
+- FROZEN_DISPUTED: reviewers disagree; review finishes with the evidence positions.
+- UNRESOLVED_MAX_CYCLES: unverified findings or open questions (legacy public name;
+  v2 does not run cycles).
+- FIXES_VERIFIED: specified historical claims refuted/fixed by both reviewers;
+  limited scope, never a full-review pass.
+- FAILED / CANCELED / ORPHANED: incomplete execution with partial evidence retained.
+- PREPARED_DRY_RUN: inputs/prompts prepared with no reviewer calls.
+- RESUMING: a detached recovery has started; old terminal output is not current state.
 
-A real `run` starts the same controller in a new local process session by default and returns a durable `job_id`; `--foreground` is reserved for explicit debugging/manual synchronous execution, while `--dry-run` stays synchronous. `status --job <job_id>` reads the detached job; `status` without a job id resolves the most recent detached job. An outer-agent disconnect does not change controller state. If the detached process itself disappears before writing a terminal result, status is `ORPHANED`; automatic recovery from an unknown half-executed process is intentionally not attempted.
+A discovery origin counts as ACCEPT. A peer ACCEPT confirms it; REJECT disputes it.
+Historical claims require two current verification positions. Both REJECT means
+RESOLVED, both ACCEPT means still present, disagreement means DISPUTED. Missing or
+UNCERTAIN positions mean UNVERIFIED. Absence in new discovery never means fixed.
 
-A `FAILED` job can re-enter the same state machine with `resume --job <job_id>`. Resume does not trust the last persisted ledger as its starting point. It reloads the original invocation and fingerprint, verifies the repository/target/AGENTS.md plus reviewer model/reasoning are unchanged, then deterministically replays round checkpoints in the normal reviewer order. Adapter changes fail closed except for an audited Reviewer-A OpenCode/Claude-to-Pi harness migration of the same canonical model; that migration is recorded in resume metadata and forces a fresh preflight.
-- a currently valid `result.json` is reused with no model call;
-- if a completed reviewer process exited 0 and its saved `raw.stdout` now parses and validates, the result is recovered with no model call;
-- otherwise only that missing/failed reviewer slot is called again;
-- discovery remains blind and cross-check uses the same cycle ordering as a fresh run.
+`status.json` is the sole current status. Reports, results and generated indexes
+are projections. A process lock prevents concurrent controllers for the same run.
+Detached controller logs are diagnostic, never a source of current status.
 
-Before a resume, the previous terminal state is copied under `run_dir/resume/<timestamp>/`. Before an actual reviewer retry overwrites a failed slot, that slot's prior artifacts are copied under its `attempts/<timestamp>/`. `review_calls` remains the cumulative count of actual reviewer model attempts, so repeated recovery attempts can make it exceed the original logical `max_model_calls` budget; the bounded cycle topology itself does not change.
+Resume keeps the run ID, archives the previous status/result and replays the finite
+workflow. Every reused checkpoint must match the exact prompt/input fingerprint,
+reviewer configuration and protocol, and a saved result checksum. Completed raw
+responses may be recovered without another task. Changed source/configuration
+fails closed; v1 workflows are inspection-only, with no migration exceptions.
 
-Cross-check ledger updates are transactional and order-independent. The controller assigns stable IDs to new findings first, resolves `REFINE`/`DUPLICATE_OF` relations to canonical targets (flattening duplicate/superseded chains), validates the full relation graph for unknown targets and cycles, then commits the batch atomically. A failed relation batch leaves the prior ledger unchanged.
+Limits apply to all attempts across resume. Known token usage includes cached
+reads; missing usage/cost stays unknown. Tokens are observed at event boundaries,
+so one in-flight request may overshoot a limit. Provider retries are capped where
+exposed as events. Wall time, turns, tools, repeated calls, prompt/output size and
+cancellation also bound tasks. Active wall time is checkpointed during supervision;
+waiting between resumes does not spend active time. No automatic full-task retries.
 
-`state/state.json` intentionally records coarser durable checkpoints (`INIT`, `PREPARED`, `PREFLIGHT`, `DISCOVERY_PARALLEL`, `CROSS_CHECK`, then the final state). The flow above describes the internal logical phases; the persisted checkpoint names are not a one-to-one trace of every helper step.
-
-## Finding states
-
-- `OPEN`: only one independent reviewer position exists.
-- `ACCEPTED`: latest positions from both reviewers accept the finding.
-- `REJECTED`: latest positions from both reviewers reject the finding.
-- `DISPUTED`: latest positions disagree.
-- `SUPERSEDED`: replaced by a refined finding.
-- `DUPLICATE`: explicitly linked to another stable finding.
-
-Discovery origin counts as that reviewer's ACCEPT position.
-
-## Convergence
-
-Before the final allowed cycle, converge only after a quiet complete serial cycle when:
-- no new finding was created during the cycle
-- no `OPEN` or `DISPUTED` finding remains after both reviewers finish the cycle
-- every worker confirmed every required `AGENTS.md`
-- target/repository fingerprint is unchanged
-
-At `max_cycles`, a newly created finding does not by itself force `UNRESOLVED_MAX_CYCLES` if the other reviewer adjudicated it in that same cycle and no `OPEN` or `DISPUTED` finding remains. A finding created by the second reviewer remains `OPEN` and therefore still prevents convergence. This preserves the extra reverse-order cross-check when budget remains while allowing a fully adjudicated final cycle to freeze.
-
-## Final states
-
-- `FROZEN_PASS`: converged and no accepted blocking finding.
-- `FROZEN_CHANGES_REQUIRED`: converged with one or more accepted blocking findings.
-- `FROZEN_DISPUTED`: max cycles reached with disputed findings.
-- `UNRESOLVED_MAX_CYCLES`: max cycles reached with one or more `OPEN` findings that did not receive an independent second reviewer position.
-- `FAILED`: infrastructure, target-drift, read-only, timeout, or protocol failure.
-
-The frozen object is the review conclusion, not a repaired target.
+Raw stdout/stderr are streamed into immutable attempt directories under `audit/`.
+Cancellation/timeouts terminate worker process groups and preserve partial events.
+A disappeared detached controller becomes ORPHANED on status inspection. Resume
+verifies inputs and checkpoints; it never trusts a partially updated final ledger.

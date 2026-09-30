@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .base import ReviewerAdapter
+from ..execution import stream_review
 from ..schemas import RESULT_SCHEMA
 from ..util import LoopReviewError, atomic_json, run_cmd, write_text
 
@@ -29,6 +30,7 @@ class ClaudeAdapter(ReviewerAdapter):
             "--permission-mode", "dontAsk",
             "--permission-prompts", "none",
             "--allowedTools", "Read,Glob,Grep",
+            "--tools", "Read,Glob,Grep",
             "--model", self.config["model"],
             "--effort", self.config["reasoning"],
             "--output-format", "json",
@@ -43,8 +45,20 @@ class ClaudeAdapter(ReviewerAdapter):
     def _extract(self, stdout: str) -> Dict[str, Any]:
         try:
             outer = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            raise LoopReviewError("INVALID_JSON", f"Claude CLI did not return JSON: {e}", {"stdout": stdout[-4000:]})
+        except json.JSONDecodeError:
+            events = []
+            for line in stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "result":
+                    events.append(event)
+            if not events:
+                raise LoopReviewError("INVALID_JSON", "Claude stream has no terminal result")
+            outer = events[-1]
+        if not isinstance(outer, dict):
+            raise LoopReviewError("INVALID_JSON", "Claude terminal result must be an object")
         if outer.get("is_error"):
             raise LoopReviewError("MODEL_CALL_FAILED", "Claude model returned an error", {"raw": outer})
         structured = outer.get("structured_output")
@@ -90,19 +104,23 @@ class ClaudeAdapter(ReviewerAdapter):
             argv += ["--add-dir", str(read_dir)]
         argv += [
             "--json-schema", json.dumps(RESULT_SCHEMA, separators=(",", ":")),
-            prompt,
         ]
+        argv[argv.index("--output-format") + 1] = "stream-json"
+        argv += ["--verbose", "--max-turns", str(self.limits.get("max_turns", 32)), prompt]
         timeout_seconds = int(self.config["timeout_seconds"])
         started = time.time()
         try:
-            cp = run_cmd(argv, cwd=cwd, timeout=timeout_seconds)
+            cp = stream_review(argv, cwd=cwd, out_dir=out_dir, timeout=timeout_seconds,
+                               limits=self.limits, progress=self.progress, cancel=self.cancel)
         except LoopReviewError as e:
             duration_ms = int((time.time() - started) * 1000)
-            if e.code == "TIMEOUT":
-                write_text(out_dir / "raw.stdout", str(e.details.get("stdout", "")))
-                write_text(out_dir / "raw.stderr", str(e.details.get("stderr", "")))
+            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
+                if not (out_dir / "raw.stdout").exists():
+                    write_text(out_dir / "raw.stdout", str(e.details.get("stdout", "")))
+                if not (out_dir / "raw.stderr").exists():
+                    write_text(out_dir / "raw.stderr", str(e.details.get("stderr", "")))
                 meta = {
-                    "status": "TIMEOUT",
+                    "status": e.code,
                     "duration_ms": duration_ms,
                     "exit_code": None,
                     "model": self.config["model"],
@@ -119,7 +137,7 @@ class ClaudeAdapter(ReviewerAdapter):
                     },
                 )
                 raise LoopReviewError(
-                    "TIMEOUT",
+                    e.code,
                     e.message,
                     {
                         "timeout_seconds": timeout_seconds,
@@ -136,8 +154,10 @@ class ClaudeAdapter(ReviewerAdapter):
             raise
 
         duration_ms = int((time.time() - started) * 1000)
-        write_text(out_dir / "raw.stdout", cp.stdout)
-        write_text(out_dir / "raw.stderr", cp.stderr)
+        if not (out_dir / "raw.stdout").exists():
+            write_text(out_dir / "raw.stdout", cp.stdout)
+        if not (out_dir / "raw.stderr").exists():
+            write_text(out_dir / "raw.stderr", cp.stderr)
         meta = {
             "status": "OK" if cp.returncode == 0 else "FAILED",
             "duration_ms": duration_ms,

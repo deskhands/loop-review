@@ -1,101 +1,70 @@
 ---
 name: loop-review
-description: Orchestrate an auditable, read-only multi-model review loop for design proposals, code changes, or an existing review. Use when the user asks for loop-review, wants a design/code review to converge across two independent reviewers, or wants an existing review independently verified. The skill records original inputs without summarizing them, enforces applicable AGENTS.md rules on every round, runs blind parallel discovery followed by bounded serial cross-checks, and returns a frozen review status without modifying the reviewed target.
+description: Run a bounded, read-only two-model review of code, a design proposal, or an existing review. Use for independent discovery and cross-verification, or targeted verification of fixes from a prior review. Preserve inputs and evidence, finish with confirmed/disputed/unverified findings, and return a readable report.
 ---
 
 # loop-review
 
-Run the deterministic controller; do not reproduce its orchestration in conversation.
+Use the deterministic controller. It owns reviewer calls, budgets, checkpoints and
+completion. The reviewed target stays unchanged.
 
-## Workflow
+## Run
 
-1. Identify the mode: `design`, `code`, or `review`.
-2. Preserve the user's request and supplied target text verbatim. Do not summarize or rewrite them.
-3. Determine the repository root. V1 requires the supplied repository to be a Git repository for every mode so repository state can be fingerprinted and audited.
-4. Build an invocation JSON matching [references/invocation.md](references/invocation.md).
-5. Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`, then start the review:
+1. Identify `design`, `code` or `review` mode. Preserve the user's request verbatim.
+   Use the existing target file when available; a Git repository is required.
+2. Create the [invocation](references/invocation.md). Supply a short meaningful
+   `title` for this run and `task.title` for the work being reviewed. Reuse an
+   explicit task ID for related work; similar titles alone never establish linkage.
+3. Resolve `SKILL_ROOT` to this skill directory and start:
    ```bash
-   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json>
+   python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <file.json> --json
    ```
-   Real reviews run detached by default so they survive an outer-agent/tool-session disconnect. Preserve the returned `job_id`. Do not start a second review for the same request merely because the outer session was interrupted. Use `--foreground` only for explicit debugging/manual synchronous execution.
-6. Query the detached job:
+   Real runs detach by default. Preserve `run_id` (also returned as `job_id`) and
+   `report_path`. Use `--foreground` only for debugging/manual execution.
+4. Check the same run:
    ```bash
-   python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
+   python3 "$SKILL_ROOT/scripts/loop_review.py" status --run <run_id> --json
    ```
-   If the exact job id is unavailable, `status` without `--job` resolves the most recent detached job. If status is `RUNNING`, leave the local review running and normally return control to the outer conversation; a later outer-agent turn should query the same job instead of rerunning reviewers. Do not continuously poll with short sleeps. Only if the outer agent judges that waiting in the current turn is useful, wait about 120 seconds before one additional status check.
-7. When the job reaches a controller terminal state, read the returned `status_path` and `review_path`.
-8. If status is `FAILED`, do not start a fresh review for the same request. When the user wants to continue/retry, resume the same job:
-   ```bash
-   python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
-   ```
-   Resume is detached by default and keeps the same `job_id`. It deterministically replays validated checkpoints, reuses successful reviewer results, tries to recover a completed exit-0 raw response with the current parser/schema, and calls a model only for a reviewer slot that has no reusable result. Then query `status --job <job_id>` as usual. If resume reports `FAILED_INPUT_CHANGED`, `RESUME_CONFIG_CHANGED`, or `RESUME_CHECKPOINT_INVALID`, report that error instead of forcing a restart.
-9. For a non-failed frozen/unresolved result, perform the required **Outer Agent Acceptance** described in [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md). The controller's `FROZEN_*` status is a frozen review conclusion, not automatic acceptance by the outer agent.
-10. Report both the controller review status and the outer acceptance status to the user, keeping them distinct.
-11. If a detached job is `ORPHANED`, report that the local controller process ended without a terminal result; do not silently restart it or bypass a reviewer.
+   While active, report the phase/progress and retain that run ID. Avoid repeated
+   short polling and duplicate runs. Use `list --json` to locate a lost ID; inspect
+   title, repository and task rather than assuming the global latest is yours.
+5. At completion, read `report.md` and `status.json` in the returned run directory.
+   Read `result.json` for precise claims/positions; raw audit files only for a
+   concrete diagnostic question. Report confirmed findings, disagreements and
+   unverified claims separately. A completed review can require changes.
+6. Apply [outer acceptance](references/outer-agent-acceptance.md) to the conclusion,
+   bounded to material evidence and the original request. Agreement is not proof.
 
-The controller owns prompt construction, reviewer ordering, timeouts, state transitions, evidence retention, and freeze decisions. Reviewer workers must not be called separately as a substitute for the controller. The outer agent alone owns acceptance of the frozen review in the context of the original user request.
+## Related reviews and recovery
 
-## Input rules
+- A changed target starts a **new run** under the existing task. Explicitly set
+  `previous_run_id` when historical unresolved issues should be checked.
+- A full review keeps both discovery prompts independent of prior findings.
+  Historical claims enter targeted verification after discovery is persisted.
+- For **fixes only**, use `scope: "fixes"` with a previous run. Report this limited
+  scope explicitly; it cannot establish a complete review of the current target.
+- For an unchanged incomplete run, resume only when the user asks to continue:
+  ```bash
+  python3 "$SKILL_ROOT/scripts/loop_review.py" resume --run <run_id> --json
+  ```
+  Successful exact-input checkpoints are reused. Failed attempts, active time and
+  known tokens remain charged to the same budget. Config/input drift and exhausted
+  budgets are errors; do not bypass them with silent retries or a fresh run.
+- Cancel an active run with `cancel --run <run_id> --json`. Cancellation is recorded
+  and supervised workers stop, including launcher descendants.
+- Historic v1 runs are inspection-only. Model/harness changes require a new run;
+  there are no model-specific migration exceptions.
 
-- If the user supplied a design/review body in chat, place the exact text in the invocation as `kind = "text"`; the controller persists it.
-- If the target already exists as a local file, pass `kind = "file"` and its absolute path. Do not duplicate large files.
-- For `review` mode, provide both the original target and the seed review.
-- V1 requires `repo` to resolve to a Git repository in every mode. For `code` mode, use `working-tree` unless the user explicitly specifies a Git range.
-- Never modify the reviewed target to make the review pass.
+## Completion
 
-## Mandatory behavior
+The controller performs parallel discovery and at most one parallel verification
+phase. Empty complete discoveries finish early. New verification findings remain
+unverified; disputes terminate without another debate loop. Partial failures still
+produce a report, and never receive a passing conclusion.
 
-- Treat every applicable `AGENTS.md` as binding. The controller discovers and fingerprints them; every worker must read the original files on every round.
-- Preserve fresh worker contexts. Do not carry interactive sessions between rounds.
-- Keep the review read-only. Workers receive only read/search capabilities.
-- Let the controller freeze only the review conclusion. `FROZEN_CHANGES_REQUIRED` is a valid successful review outcome.
-- Require outer-agent acceptance after every non-failed frozen/unresolved result. Do not treat model convergence as authority over the user's original goal.
-- Keep all run artifacts under the configured run root for audit.
-- On retry, resume the failed job in place instead of creating a new run. Never rerun a reviewer slot that already has a valid checkpoint merely to simplify recovery.
-- Resume only when the original input fingerprint and reviewer model/reasoning still match. Adapter changes fail closed except for an audited Reviewer-A OpenCode/Claude-to-Pi harness migration of the same canonical model; record that migration in resume metadata. Do not mix checkpoints across changed inputs or model configurations.
-- Do not busy-wait on detached jobs. Prefer a later outer-agent turn over repeated polling; if same-turn waiting is useful, use roughly 120 seconds between status checks rather than short sleep loops.
+Human-readable `list` and `status` are available without `--json`. Generated root,
+repository and task indexes link the reports. `status.json` is authoritative.
 
-For schemas and semantics, consult:
-- [references/invocation.md](references/invocation.md)
-- [references/reviewer-protocol.md](references/reviewer-protocol.md)
-- [references/state-machine.md](references/state-machine.md)
-- [references/outer-agent-acceptance.md](references/outer-agent-acceptance.md)
-
-## Local commands
-
-Resolve `SKILL_ROOT` to the directory containing this `SKILL.md`.
-
-Health check:
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" doctor
-```
-
-Prepare a run without model calls:
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --dry-run
-```
-
-Start a durable review (detached by default):
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json>
-```
-
-Run synchronously only for explicit debugging/manual use:
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <invocation.json> --foreground
-```
-
-Check a detached review:
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
-```
-
-Resume a failed review in place (detached by default):
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
-```
-
-Run tests:
-```bash
-python3 -m unittest discover -s "$SKILL_ROOT/tests" -v
-```
+For configuration and artifact organization see the repository README. Consult
+[protocol](references/reviewer-protocol.md) for output details and
+[state semantics](references/state-machine.md) for checkpoints, limits and status.

@@ -1,39 +1,9 @@
 # loop-review
 
-`loop-review` is an auditable, read-only multi-model review Skill for design proposals, code changes, and existing review results.
-
-It orchestrates two independent reviewer workers, builds a structured issue ledger, performs bounded cross-check cycles, freezes the review conclusion deterministically, and then returns control to the outer agent for final acceptance.
-
-## Why
-
-A single reviewer can miss defects or over-trust its own assumptions. `loop-review` uses:
-
-- blind independent discovery by two different models;
-- mandatory `AGENTS.md` compliance on every round;
-- structured JSON results instead of parsing Markdown as machine state;
-- a deterministic Python controller for state, convergence, and failure handling;
-- read-only reviewer permissions;
-- persisted prompts, raw outputs, findings, and final reports for audit;
-- an outer-agent acceptance step after the review conclusion is frozen.
-
-The Skill does **not** modify the reviewed design or source code.
-
-## Repository layout
-
-```text
-.
-├── README.md
-└── skills/
-    └── loop-review/
-        ├── SKILL.md
-        ├── agents/
-        ├── assets/
-        ├── references/
-        ├── scripts/
-        └── tests/
-```
-
-The Skill lives under `skills/loop-review/` so standard Agent Skills tooling can discover it without treating repository documentation as part of the Skill.
+A read-only two-model review of code, design proposals or existing review claims.
+Two independent discoveries are followed by targeted cross-verification. The
+controller finishes with confirmed, disputed or unverified findings; it does not
+keep debating until models agree or modify the reviewed target.
 
 ## Install with npx skills
 
@@ -75,203 +45,124 @@ You can also install directly from the Skill path:
 npx skills add https://github.com/deskhands/loop-review/tree/main/skills/loop-review -g
 ```
 
-## Runtime requirements
+## Requirements and configuration
 
-Installing the Skill does not install its external reviewer CLIs.
+Python 3.11+, Git, Pi CLI and Claude Code CLI. Use project/machine-managed runtimes;
+configuration is `~/.config/loop-review/config.toml`. Start from
+[config.example.toml](skills/loop-review/assets/config.example.toml).
 
-You need:
+Current model choices are unchanged: Qwen3.8 Flash via Pi/OpenRouter, and DeepSeek
+via the provider-isolated Claude launcher. Model selection is deferred to phase two.
+Use provider-native authentication; configuration and artifacts contain no keys.
+Existing v1 configuration is accepted with bounded-workflow defaults; old `loop`
+fields no longer drive iterations. New configuration uses `[limits]`.
 
-- Python 3.9+
-- Git
-- Pi CLI
-- Claude Code CLI
-- working OpenRouter authentication for Pi and DeepSeek-official authentication for Claude Code
+## Organizing results
 
-The default example configuration uses:
-
-- Qwen3.8-Flash via Pi + OpenRouter with `high` reasoning
-- DeepSeek via Claude Code + DeepSeek official with `max` reasoning
-
-Model identifiers and executable locations are configurable. Reviewer A passes provider/model/reasoning explicitly to Pi, so a user's ordinary Pi default can remain on another provider/model without affecting `loop-review`.
-
-## Configure
-
-`loop-review` reads:
+All runs are outside reviewed repositories, under configured `run_root` (default
+`~/code/agents-tmp/loop-review`). Same Git common directory groups worktrees;
+separate clones are distinct. A repository-name suffix is used only for collisions.
 
 ```text
-~/.config/loop-review/config.toml
+loop-review/
+├── README.md
+└── DeskHands-next/
+    ├── repo.json
+    ├── README.md
+    └── 运行时迁移/
+        ├── task.json
+        ├── README.md
+        └── 2026-09-30_193000__design__修改方案复核__a1b2c3d4/
+            ├── report.md
+            ├── status.json
+            ├── result.json
+            ├── manifest.json
+            ├── input/
+            └── audit/
 ```
 
-Start from the bundled example:
+Titles identify the purpose; IDs identify exact runs. The same run ID is used for
+background job commands. Root/repository/task indexes link reports and show the
+latest known phase or conclusion. `status.json` is authoritative; controller logs
+and prior resume snapshots never override it.
 
-```text
-skills/loop-review/assets/config.example.toml
-```
+Supply `task.id`, `task.title`, and a run `title` in the
+[invocation](skills/loop-review/references/invocation.md). A matching title alone
+never merges unrelated tasks. Changed code/design creates a new run under the task.
+An unchanged failed run resumes in place with immutable raw attempts.
 
-Typical configuration:
+## Commands
 
-```toml
-version = 1
-
-[paths]
-run_root = "~/code/agents-tmp/loop-review"
-
-[loop]
-max_cycles = 2
-max_model_calls = 6
-
-[reviewers.qwen]
-adapter = "pi"
-executable = "pi"
-model = "qwen/qwen3.8-flash"
-reasoning = "high"
-timeout_seconds = 1800
-
-[reviewers.deepseek]
-adapter = "claude"
-executable = "claude-deepseek"
-model = "deepseek-flash[1m]"
-reasoning = "max"
-timeout_seconds = 1800
-```
-
-The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Reviewer A uses Pi in ephemeral JSON mode with extensions/skills/project context disabled and only `read,grep,find,ls` enabled; its raw JSON event stream is retained for audit, including turn/tool/cost metadata. Reviewer B uses Claude Code with `Read,Glob,Grep` only. The Reviewer A configuration key is `[reviewers.qwen]`; historical `glm`/`grok` round and preflight artifact names are recognized read-only for legacy runs.
-
-If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
-
-Cross-check ledger updates are applied transactionally. New findings receive stable IDs first; `REFINE` and `DUPLICATE_OF` relations are resolved to canonical targets before any ledger mutation is committed. Duplicate/superseded chains are flattened, cycles are rejected deterministically, and adjudication array order does not change the resulting ledger. A relation failure leaves the previous ledger unchanged.
-
-Use CLI/provider-native authentication. Do not put API keys or access tokens in this configuration file. Pi can authenticate to OpenRouter through its own auth store or the `OPENROUTER_API_KEY` environment variable; Claude Code can use a provider-isolated launcher for DeepSeek official.
-
-If a CLI or launcher is not on `PATH`, set `executable` to its explicit path, such as `~/.local/bin/pi` or `~/.local/bin/claude-deepseek`.
-
-## Verify installation
-
-Resolve `SKILL_ROOT` to the installed `loop-review` Skill directory and run:
+Resolve `SKILL_ROOT` to `skills/loop-review` or its installed location.
 
 ```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" doctor
+python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation invocation.json
+python3 "$SKILL_ROOT/scripts/loop_review.py" list
+python3 "$SKILL_ROOT/scripts/loop_review.py" list --repo /absolute/repository
+python3 "$SKILL_ROOT/scripts/loop_review.py" status --run a1b2c3d4
+python3 "$SKILL_ROOT/scripts/loop_review.py" cancel --run a1b2c3d4
+python3 "$SKILL_ROOT/scripts/loop_review.py" resume --run a1b2c3d4
 ```
 
-The doctor command verifies both configured reviewer CLIs, models, reasoning levels, and structured-output compatibility.
+Add `--json` for agent/program callers. `--job` is an alias for `--run`.
+Real execution detaches by default; `--foreground` is for manual/debug runs.
+`--dry-run` prepares readable inputs/prompts without model calls. `doctor` explicitly
+performs small provider health checks; it is not automatically run for every review
+and does not establish long-task reliability.
 
-## Usage
+## Historical fixes and independence
 
-Ask an outer agent that can execute local commands to use `loop-review`.
+Task membership is organizational only. Set `previous_run_id` to link a prior
+terminal v2 run of the same repository/task. Full-review discovery receives no prior
+findings. Only unresolved historical claims are supplied to targeted verification,
+with evidence rechecked against current source. Both reviewers must refute a
+historical claim to mark it RESOLVED; absence from discovery does not prove a fix.
 
-Examples:
+`scope: "fixes"` verifies specified historical claims without discovery. Its
+`FIXES_VERIFIED` outcome is limited scope, never a complete review of current code.
 
-```text
-Use loop-review to review the current working tree.
-```
+## Limits, failures and audit
 
-```text
-Use loop-review to review this design for correctness, simplicity, and AGENTS.md compliance.
-```
+Normal full reviews use two discovery tasks and up to two verification tasks.
+Empty complete discoveries finish after two tasks. Verification does not recursively
+expand: new defects remain unverified, and disagreement is a terminal outcome.
+Open questions prevent a passing conclusion.
 
-```text
-Use loop-review to independently verify this existing review against the source repository.
-```
+Default limits include six **total task attempts across resume**, 32 turns per
+task, 48 tool calls, three identical calls, two exposed provider retries, two million
+known cumulative tokens and 30 minutes of cumulative active execution. Limits can
+be configured before starting a run. Token totals include cached reads; an in-flight
+request may overshoot the ceiling. Unavailable usage/cost is explicitly unknown,
+and CLI-reported costs are not necessarily provider billing.
 
-Supported modes:
+Events and stderr are written during execution. Live status shows phase, task
+attempts, active time, last event, turns, tools and known usage. Timeouts, cancellation
+and limits terminate entire worker process groups. Failures preserve successful
+peer evidence and generate an incomplete report.
 
-- `design`
-- `code`
-- `review`
+Resume reuses only exact call-input checkpoints (prompt, repository/target/policy
+fingerprint, reviewer configuration and protocol), validates checksums, and may
+recover completed raw output without a new task. It keeps cumulative consumption.
+Changed inputs/configuration or exhausted budgets fail closed. Historical v1 runs
+remain listed/readable but are not resumed using v2 semantics.
 
-Real reviews are detached by default, so outer agents do not need to predict whether a review will be short or long:
-
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" run \
-  --invocation /path/to/invocation.json
-```
-
-The command returns immediately with a durable `job_id`. Query that same review later without rerunning models:
-
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" status --job <job_id>
-```
-
-If status is `RUNNING`, normally return control to the outer conversation and check the same `job_id` on a later turn. Do not continuously poll with short sleeps. Only when the outer agent judges that waiting in the current turn is useful should it wait about 120 seconds before one additional status check.
-
-If status is `FAILED`, resume the same job instead of starting a fresh review:
-
-```bash
-python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
-```
-
-Resume is detached by default and keeps the same `job_id`. It replays the normal review state machine from durable artifacts: an already validated `result.json` is reused, an exit-0 `raw.stdout` is recovered without another model call when it now parses and validates, and only a reviewer slot with no reusable checkpoint is called again. This means a failure after several expensive calls does not throw those successful calls away.
-
-Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if reviewer model/reasoning changed. Adapter changes also fail closed except for an audited Reviewer-A OpenCode/Claude-to-Pi harness migration of the same canonical model; that migration forces a fresh preflight and is recorded in resume metadata. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, actual rerun calls, and any recorded reviewer migration.
-
-If the exact job id was lost, `status` without `--job` resolves the most recent detached job. `--dry-run` remains synchronous, and `--foreground` is available only for explicit debugging/manual synchronous execution. The older `--detach` flag remains accepted as a compatibility alias for the default behavior.
-
-Detached execution deliberately uses no daemon, database, queue, or server: it is the same controller process started in a new OS session, with a small metadata/stdout/stderr record under `<run_root>/_jobs/`. A known `FAILED` run is resumable as described above. If the detached process disappears while its state is still unknown, status is `ORPHANED`; automatic recovery of that potentially half-executed process is intentionally out of scope.
-
-The controller runs blind discovery first, then bounded serial cross-checks. The final controller state can be:
-
-- `FROZEN_PASS`
-- `FROZEN_CHANGES_REQUIRED`
-- `FROZEN_DISPUTED`
-- `UNRESOLVED_MAX_CYCLES`
-- `FAILED`
-
-A frozen controller result is **not** automatic acceptance. The outer agent separately reports:
-
-- `ACCEPTED`
-- `REJECTED`
-- `NEEDS_FOLLOWUP`
-
-See `skills/loop-review/references/outer-agent-acceptance.md` for the acceptance protocol.
-
-## Security model
-
-This repository intentionally contains **no API keys, access tokens, passwords, private keys, cookies, or provider credentials**.
-
-The Skill:
-
-- relies on Pi/OpenRouter authentication for Reviewer A and Claude Code/DeepSeek authentication for Reviewer B;
-- does not copy provider credentials into run artifacts;
-- disables Skill delegation for reviewer workers;
-- constrains reviewer workers to read/search capabilities;
-- rejects target/repository drift during a review;
-- fails closed instead of silently falling back to one reviewer.
-
-The local configuration file `~/.config/loop-review/config.toml` is not part of this repository.
-
-### Review artifacts may be sensitive
-
-Review runs can contain:
-
-- user requests;
-- design documents;
-- source diffs;
-- file paths;
-- prompts;
-- raw model output;
-- issue ledgers.
-
-They are stored under the configured `run_root`. Treat that directory as potentially sensitive and do not commit it to source control.
+Review data may contain source, requests and sensitive paths; keep the run root
+outside version control. Workers are restricted to read/search tools. Discovery
+independence is enforced by supplied context/protocol, not an OS filesystem sandbox.
+A frozen conclusion still needs bounded
+[outer acceptance](skills/loop-review/references/outer-agent-acceptance.md).
 
 ## Development
 
-Run the test suite:
+The implementation uses the Python standard library, with no daemon/database or
+workflow framework. The first-phase design is
+[bounded-review-design.md](docs/bounded-review-design.md).
 
 ```bash
 python3 -m unittest discover -s skills/loop-review/tests -v
 ```
 
-The current suite covers controller flow, Pi/Claude reviewer configuration, Pi JSON-event parsing and diagnostics, schema validation, `AGENTS.md` rule handling, issue-ledger transitions, checkpoint resume, legacy artifact migration, and failure auditing.
-
-## Updating
-
-If installed with the Skills CLI:
-
-```bash
-npx skills check
-npx skills update
-```
-
-## Status
-
-The Skill is functional and has been exercised with real Pi/OpenRouter/Qwen and Claude Code/DeepSeek-official reviewer calls. Before making this repository public, choose and add an explicit open-source license.
+Deterministic tests use fake reviewers and local process fixtures; no paid provider
+calls are required. They cover workflow termination, history isolation, checkpoint
+recovery, cumulative budgets, stream persistence, process cleanup, artifact grouping
+and CLI background execution. Provider reliability/model evaluation is phase two.

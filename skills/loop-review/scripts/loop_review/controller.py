@@ -2,95 +2,51 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import fcntl
 import json
-import os
-import re
 import secrets
-import shutil
-from datetime import datetime
+import threading
+import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .adapters import ClaudeAdapter, PiAdapter
 from .agents_rules import discover_rules
-from .git_state import (
-    ensure_repo,
-    git_range_fingerprint,
-    repo_meta,
-    working_tree_fingerprint,
-    write_range_diff,
-    write_working_tree_diff,
-)
-from .ledger import (
-    accepted_blocking_ids,
-    active_ids,
-    add_discovery_result,
-    apply_crosscheck_result,
-    final_status,
-    new_ledger,
-    status_counts,
-)
+from .execution import DEFAULT_LIMITS
+from .git_state import (ensure_repo, git_range_fingerprint, repo_meta, working_tree_fingerprint,
+                        write_range_diff, write_working_tree_diff)
+from .ledger import discovery_claims, final_status, resolve_claims
 from .prompts import build_prompt
-from .renderer import render_final, render_round
+from .renderer import render_final
 from .schemas import validate_result
-from .util import (
-    LoopReviewError,
-    atomic_json,
-    expand_path,
-    load_json,
-    sha256_file,
-    write_text,
-)
+from .store import RunStore, timestamp
+from .util import LoopReviewError, atomic_json, expand_path, load_json, sha256_bytes, sha256_file, write_text
 
 
 class LoopReviewController:
     def __init__(self, config: Dict[str, Any], skill_root: Path):
-        self.config = config
+        self.config = copy.deepcopy(config)
+        self.config['limits'] = {**DEFAULT_LIMITS, **config.get('limits', {})}
         self.skill_root = skill_root.resolve()
+        self.store = RunStore(Path(config['paths']['run_root']))
         self.reviewers = {
-            "qwen": PiAdapter("qwen", config["reviewers"]["qwen"]),
-            "deepseek": ClaudeAdapter("deepseek", config["reviewers"]["deepseek"]),
+            'reviewer-a': PiAdapter('reviewer-a', config['reviewers']['qwen']),
+            'reviewer-b': ClaudeAdapter('reviewer-b', config['reviewers']['deepseek']),
         }
-        self.aliases = {"qwen": "Reviewer-A", "deepseek": "Reviewer-B"}
+        self.lock = threading.RLock()
+        self.state: Dict[str, Any] = {}
+        self.result: Dict[str, Any] = {}
+        self.session_started = 0.0
+        self.prior_elapsed = 0.0
+        self.run_dir = Path()
+        self.last_publish = 0.0
 
     def doctor(self, cwd: Optional[Path] = None) -> Dict[str, Any]:
         cwd = (cwd or Path.home()).resolve()
-        results: Dict[str, Any] = {}
-        errors: Dict[str, Any] = {}
-
-        def run_one(name: str) -> Tuple[str, Dict[str, Any]]:
-            return name, self.reviewers[name].healthcheck(cwd)
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {pool.submit(run_one, name): name for name in self.reviewers}
-            for future, name in [(f, futures[f]) for f in futures]:
-                try:
-                    key, result = future.result()
-                    results[key] = result
-                except LoopReviewError as e:
-                    errors[name] = {"code": e.code, "message": e.message, "details": e.details}
-                except Exception as e:
-                    errors[name] = {"code": "UNEXPECTED_ERROR", "message": str(e)}
-
-        if errors:
-            raise LoopReviewError("FAILED_PREFLIGHT", "One or more reviewers failed preflight", errors)
-        return {"ok": True, "reviewers": results}
-
-    def _new_run_dir(self, repo: Path, mode: str) -> Tuple[str, Path]:
-        run_id = secrets.token_hex(3)
-        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.name)[:48] or "repo"
-        root = Path(self.config["paths"]["run_root"]).resolve()
-        try:
-            root.relative_to(repo.resolve())
-        except ValueError:
-            pass
-        else:
-            raise LoopReviewError("CONFIG_ERROR", "paths.run_root must be outside the reviewed repository")
-        root.mkdir(parents=True, exist_ok=True)
-        run_dir = root / f"{stamp}__{slug}__{mode}__{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=False)
-        return run_id, run_dir
+            futures = {name: pool.submit(adapter.healthcheck, cwd) for name, adapter in self.reviewers.items()}
+            return {'ok': True, 'reviewers': {name: future.result() for name, future in futures.items()}}
 
     def _persist_source(self, source: Dict[str, Any], input_dir: Path, name: str) -> Tuple[str, Path]:
         kind = source.get("kind")
@@ -131,7 +87,7 @@ class LoopReviewController:
             raise LoopReviewError("INVALID_INVOCATION", "request object is required")
         request_text, request_path = self._persist_source(request_source, input_dir, "request")
 
-        target = invocation.get("target")
+        target: Any = invocation.get("target")
         if not isinstance(target, dict):
             raise LoopReviewError("INVALID_INVOCATION", "target object is required")
 
@@ -154,7 +110,7 @@ class LoopReviewController:
             if mode == "design":
                 raise LoopReviewError("INVALID_INVOCATION", "design mode does not support working-tree target")
             diff_path = input_dir / "target.diff"
-            changed = write_working_tree_diff(repo, diff_path)
+            changed: List[str] = write_working_tree_diff(repo, diff_path)
             atomic_json(input_dir / "changed-files.json", changed)
             target_paths = [repo / rel for rel in changed]
             target_path = diff_path
@@ -230,6 +186,7 @@ class LoopReviewController:
                 if target_kind == "working-tree":
                     write_working_tree_diff(repo, verify_path)
                 else:
+                    assert base is not None and range_head is not None
                     write_range_diff(repo, base, range_head, verify_path)
                 if sha256_file(verify_path) != sha256_file(target_path):
                     raise LoopReviewError(
@@ -245,7 +202,8 @@ class LoopReviewController:
 
     def _fingerprint(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
         repo: Path = prepared["repo"]
-        agents_files = prepared["rules"]["files"]
+        agents_files = [{**item, "sha256": sha256_file(Path(item["path"]))}
+                        for item in prepared["rules"]["files"]]
         base_fp = working_tree_fingerprint(repo, agents_files)
         kind = prepared["target_kind"]
         target_path = prepared.get("target_path")
@@ -293,96 +251,6 @@ class LoopReviewController:
                 "Repository, target, seed review, or AGENTS.md changed during review",
                 {"expected": prepared["fingerprint"], "actual": current},
             )
-
-    def _preflight(self, repo: Path, run_dir: Path) -> Dict[str, Any]:
-        preflight_dir = run_dir / "preflight"
-        preflight_dir.mkdir(parents=True, exist_ok=True)
-        result = self.doctor(repo)
-        for name, info in result["reviewers"].items():
-            atomic_json(preflight_dir / f"{name}.json", info)
-        write_text(preflight_dir / "preflight.log", "Both reviewer health checks passed.\n")
-        return result
-
-    def _round_dir(self, run_dir: Path, round_name: str, name: str) -> Path:
-        return run_dir / "rounds" / round_name / name
-
-    def _existing_round_dir(self, run_dir: Path, round_name: str, name: str) -> Path:
-        canonical = self._round_dir(run_dir, round_name, name)
-        if canonical.exists():
-            return canonical
-        if name == "qwen":
-            for legacy_name in ("glm", "grok"):
-                legacy = run_dir / "rounds" / round_name / legacy_name
-                if legacy.exists():
-                    return legacy
-        return canonical
-
-    def _preflight_checkpoint_exists(self, run_dir: Path, name: str) -> bool:
-        canonical = run_dir / "preflight" / f"{name}.json"
-        if canonical.is_file():
-            return True
-        return name == "qwen" and any(
-            (run_dir / "preflight" / f"{legacy_name}.json").is_file()
-            for legacy_name in ("glm", "grok")
-        )
-
-    def _prior_review_paths(self, run_dir: Path) -> List[str]:
-        return sorted(str(p.resolve()) for p in (run_dir / "rounds").glob("**/review.md"))
-
-    def _run_worker(
-        self,
-        *,
-        name: str,
-        out_dir: Path,
-        prepared: Dict[str, Any],
-        run_dir: Path,
-        ledger: Optional[Dict[str, Any]],
-        active: List[str],
-        phase: str,
-    ) -> Dict[str, Any]:
-        prompt = build_prompt(
-            skill_root=self.skill_root,
-            mode=prepared["mode"],
-            request_text=prepared["request_text"],
-            target_description=prepared["target_description"],
-            policy_paths=prepared["policy_paths"],
-            ledger=ledger,
-            active_ids=active,
-            prior_reviews=[] if phase == "discovery" else self._prior_review_paths(run_dir),
-            phase=phase,
-            reviewer_alias=self.aliases[name],
-            seed_review_path=str(prepared["seed_review_path"]) if prepared.get("seed_review_path") else None,
-        )
-        out_dir.mkdir(parents=True, exist_ok=True)
-        write_text(out_dir / "prompt.md", prompt)
-        response: Optional[Dict[str, Any]] = None
-        try:
-            response = self.reviewers[name].review(
-                prompt,
-                prepared["repo"],
-                run_dir,
-                out_dir,
-                prepared.get("read_dirs", []),
-            )
-            result = validate_result(
-                response["result"],
-                prepared["policy_paths"],
-                active if phase != "discovery" else None,
-            )
-            if phase == "discovery" and result["adjudications"]:
-                raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Discovery result must not adjudicate findings")
-        except LoopReviewError as e:
-            if response is not None:
-                atomic_json(out_dir / "result.invalid.json", response["result"])
-                meta = dict(response["meta"])
-                meta["status"] = "FAILED"
-                atomic_json(out_dir / "meta.json", meta)
-                atomic_json(out_dir / "error.json", {"code": e.code, "message": e.message})
-            raise
-
-        atomic_json(out_dir / "result.json", result)
-        atomic_json(out_dir / "meta.json", response["meta"])
-        return {"result": result, "meta": response["meta"], "prompt": prompt}
 
     def _load_persisted_source(
         self,
@@ -510,691 +378,318 @@ class LoopReviewController:
         self._verify_fingerprint(prepared)
         return prepared, manifest
 
-    def _verify_resume_config(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-        mapping = {
-            "reviewer-a": "qwen",
-            "reviewer-b": "deepseek",
-        }
-        saved = manifest.get("reviewers")
-        if not isinstance(saved, dict):
-            raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Run manifest has no reviewer configuration")
+    def prepare(self, invocation_path: Path, dry_run: bool = False) -> Dict[str, Any]:
+        invocation = load_json(invocation_path)
+        if not isinstance(invocation, dict) or invocation.get("mode") not in ("design", "code", "review"):
+            raise LoopReviewError("INVALID_INVOCATION", "Invocation requires a supported mode")
+        repo = ensure_repo(expand_path(invocation["repo"]))
+        previous = invocation.get("previous_run_id")
+        if previous:
+            prior = load_json(self.store.resolve(previous) / "status.json")
+            invocation.setdefault("task", {"id": prior["task_id"], "title": prior["task_title"]})
+        self.run_dir = self.store.allocate(repo, invocation)
+        self.session_started = self.prior_elapsed = 0.0
+        self.state = load_json(self.run_dir / "status.json")
+        self.result = {"schema_version": "2.0", "findings": [], "open_questions": []}
+        try:
+            if self.state["scope"] not in ("full", "fixes") or (self.state["scope"] == "fixes" and not previous):
+                raise LoopReviewError("INVALID_INVOCATION", "fixes scope requires previous_run_id")
+            prepared = self._prepare(invocation, self.run_dir, repo)
+            history = self._history_claims(previous)
+            if self.state["scope"] == "fixes" and not history:
+                raise LoopReviewError("INVALID_INVOCATION", "fixes scope requires at least one unresolved historical claim")
+            atomic_json(self.run_dir / "input" / "history.json", history)
+            manifest = {
+                "schema_version": "2.0", "workflow": "discovery-verification-v2",
+                "mode": prepared["mode"], "repo": repo_meta(repo), "limits": self.config["limits"],
+                "reviewers": self.config["reviewers"], "input_fingerprint": prepared["fingerprint"],
+                "request_sha256": sha256_file(prepared["request_path"]),
+                "invocation_sha256": sha256_file(self.run_dir / "input" / "invocation.json"),
+                "history_sha256": sha256_file(self.run_dir / "input" / "history.json"),
+                "prompt_sha256": self._prompt_fingerprint(prepared),
+            }
+            atomic_json(self.run_dir / "manifest.json", manifest)
+            self.state["status"] = "PREPARED_DRY_RUN" if dry_run else "PREPARED"
+            self._publish()
+            if dry_run:
+                for name in self.reviewers:
+                    phase = "verification" if self.state["scope"] == "fixes" else "discovery"
+                    prompt = self._prompt(prepared, name, phase, history if phase == "verification" else [])
+                    write_text(self.run_dir / "audit" / phase / name / "prompt.md", prompt)
+            self.store.indexes()
+            return dict(self.state)
+        except Exception as error:
+            raise self._failure(error)
 
-        migrations: List[Dict[str, Any]] = []
-        for alias, name in mapping.items():
-            old = saved.get(alias)
-            current = self.config["reviewers"][name]
-            if not isinstance(old, dict):
-                raise LoopReviewError("RESUME_CHECKPOINT_INVALID", f"Run manifest is missing {alias}")
+    def _history_claims(self, previous: Optional[str]) -> List[Dict[str, Any]]:
+        if not previous:
+            return []
+        directory = self.store.resolve(previous)
+        prior = load_json(directory / "status.json")
+        if prior.get("schema_version") != "2.0":
+            raise LoopReviewError("INVALID_INVOCATION", "Historical verification requires a v2 run")
+        if prior["repo_id"] != self.state["repo_id"] or prior["task_id"] != self.state["task_id"]:
+            raise LoopReviewError("INVALID_INVOCATION", "Previous run must belong to the same repository and task")
+        if prior["status"] in ("INIT", "PREPARED", "RESUMING", "DISCOVERY", "VERIFICATION"):
+            raise LoopReviewError("INVALID_INVOCATION", "Previous run has not finished")
+        result = load_json(directory / "result.json")
+        return [{"id": f"H{index + 1:03d}", "origin": "history", "previous_id": item["id"],
+                 "finding": item["finding"]}
+                for index, item in enumerate(result["findings"])
+                if item["status"] != "RESOLVED"]
 
-            old_model = str(old.get("model", ""))
-            current_model = str(current.get("model", ""))
-            old_canonical = old_model.removeprefix("openrouter/")
-            current_canonical = current_model.removeprefix("openrouter/")
-            model_migration = (
-                alias == "reviewer-a"
-                and old_canonical == "z-ai/glm-5.3-flash"
-                and current_canonical == "qwen/qwen3.8-flash"
-            )
-            if old_canonical != current_canonical and not model_migration:
-                raise LoopReviewError(
-                    "RESUME_CONFIG_CHANGED",
-                    f"{alias} model changed since the failed run",
-                    {"saved": old_model, "current": current_model},
-                )
-            if old.get("reasoning") != current.get("reasoning"):
-                raise LoopReviewError(
-                    "RESUME_CONFIG_CHANGED",
-                    f"{alias} reasoning changed since the failed run",
-                    {"saved": old.get("reasoning"), "current": current.get("reasoning")},
-                )
+    def _prompt(self, prepared: Dict[str, Any], name: str, phase: str, claims: List[Dict[str, Any]]) -> str:
+        prompt = build_prompt(
+            skill_root=self.skill_root, mode=prepared["mode"], request_text=prepared["request_text"],
+            target_description=prepared["target_description"], policy_paths=prepared["policy_paths"],
+            claims=claims, phase=phase, reviewer_alias=name,
+            seed_review_path=str(prepared["seed_review_path"]) if prepared.get("seed_review_path") else None,
+        )
+        if len(prompt.encode()) > self.config["limits"]["max_prompt_bytes"]:
+            raise LoopReviewError("PROMPT_LIMIT_EXCEEDED", "Review prompt exceeds configured byte limit; narrow the review scope")
+        return prompt
 
-            old_adapter = old.get("adapter")
-            current_adapter = current.get("adapter")
-            adapter_migration = (
-                alias == "reviewer-a"
-                and old_adapter in ("opencode", "claude")
-                and current_adapter == "pi"
-            )
-            if model_migration or adapter_migration:
-                migration = {
-                    "reviewer": alias,
-                    "from_adapter": old_adapter,
-                    "to_adapter": current_adapter,
-                    "from_model": old_model,
-                    "to_model": current_model,
-                }
-                migrations.append(migration)
-                continue
-            if old_adapter == current_adapter:
-                continue
-            raise LoopReviewError(
-                "RESUME_CONFIG_CHANGED",
-                f"{alias} adapter changed since the failed run",
-                {"saved": old_adapter, "current": current_adapter},
-            )
-        return migrations
+    def _prompt_fingerprint(self, prepared: Dict[str, Any]) -> Dict[str, str]:
+        return {f"{phase}/{name}": sha256_bytes(self._prompt(prepared, name, phase, []).encode())
+                for phase in ("discovery", "verification") for name in self.reviewers}
 
-    def _archive_resume_snapshot(self, run_dir: Path) -> Path:
-        root = run_dir / "resume"
-        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-        snapshot = root / stamp
-        snapshot.mkdir(parents=True, exist_ok=False)
-        for relative in (
-            Path("final/status.json"),
-            Path("final/review.json"),
-            Path("final/review.md"),
-            Path("state/state.json"),
-            Path("state/issue-ledger.json"),
-        ):
-            source = run_dir / relative
-            if source.is_file():
-                destination = snapshot / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-        return snapshot
+    def _reconcile_usage(self) -> None:
+        # Terminal stream accounting can survive a controller crash before status publication.
+        for stream in (self.run_dir / "audit").glob("*/*/attempt-*/stream.json"):
+            key = str(stream.parent.relative_to(self.run_dir / "audit"))
+            stats = self.state["progress"].setdefault(key, {})
+            stats.update(load_json(stream))
+            stats["status"] = "OK" if (stream.parent / "result.json").exists() else "FAILED"
 
-    def _archive_failed_slot(self, out_dir: Path) -> None:
-        if not out_dir.exists():
-            return
-        candidates = [
-            out_dir / name
-            for name in (
-                "prompt.md",
-                "raw.stdout",
-                "raw.stderr",
-                "meta.json",
-                "error.json",
-                "result.invalid.json",
-                "result.json",
-                "review.md",
-            )
-            if (out_dir / name).is_file()
-        ]
-        if not candidates:
-            return
-        attempts = out_dir / "attempts"
-        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-        archive = attempts / stamp
-        archive.mkdir(parents=True, exist_ok=False)
-        for source in candidates:
-            shutil.copy2(source, archive / source.name)
-        for source in candidates:
-            source.unlink()
+    def _elapsed(self) -> float:
+        return self.prior_elapsed + (time.monotonic() - self.session_started if self.session_started else 0)
 
-    def _checkpoint_result(
-        self,
-        *,
-        name: str,
-        out_dir: Path,
-        prepared: Dict[str, Any],
-        active: List[str],
-        phase: str,
-        required_model: Optional[str] = None,
+    def _publish(self) -> None:
+        self.state["updated_at"] = timestamp()
+        self.state["elapsed_seconds"] = round(self._elapsed(), 3)
+        self.result["status"] = self.state["status"]
+        atomic_json(self.run_dir / "status.json", self.state)
+        atomic_json(self.run_dir / "result.json", self.result)
+        write_text(self.run_dir / "report.md", render_final(self.state, self.result))
+
+    def _check_budget(self) -> None:
+        with self.lock:
+            if (self.run_dir / "audit" / "cancel.json").exists():
+                raise LoopReviewError("CANCELED", "Review canceled")
+            limits = self.config["limits"]
+            if self._elapsed() >= limits["max_run_seconds"]:
+                raise LoopReviewError("RUN_BUDGET_EXCEEDED", "Cumulative active execution time exhausted")
+            tokens = sum(item.get("total_tokens") or 0 for item in self.state["progress"].values())
+            if tokens >= limits["max_total_tokens"]:
+                raise LoopReviewError("RUN_BUDGET_EXCEEDED", "Cumulative known token budget exhausted")
+            if self.session_started and time.monotonic() - self.last_publish >= 1:
+                self._publish()
+                self.last_publish = time.monotonic()
+
+    def _progress(self, key: str, stats: Dict[str, Any]) -> None:
+        with self.lock:
+            self.state["progress"][key].update(stats)
+            if time.monotonic() - self.last_publish >= 0.5:
+                self._publish()
+                self.last_publish = time.monotonic()
+            self._check_budget()
+
+    def _checkpoint(
+        self, slot: Path, digest: str, prepared: Dict[str, Any], ids: List[str], name: str,
     ) -> Optional[Dict[str, Any]]:
-        def model_matches(meta: Dict[str, Any]) -> bool:
-            if required_model is None:
-                return True
-            actual = str(meta.get("model", "")).removeprefix("openrouter/")
-            expected = str(required_model).removeprefix("openrouter/")
-            return bool(actual) and actual == expected
-
-        def load_checkpoint(candidate_dir: Path) -> Optional[Dict[str, Any]]:
-            result_path = candidate_dir / "result.json"
-            if result_path.is_file():
-                try:
-                    result = validate_result(
-                        load_json(result_path),
-                        prepared["policy_paths"],
-                        active if phase != "discovery" else None,
-                    )
-                    if phase == "discovery" and result["adjudications"]:
-                        raise LoopReviewError(
-                            "SCHEMA_VALIDATION_FAILED",
-                            "Discovery result must not adjudicate findings",
-                        )
-                    meta_path = candidate_dir / "meta.json"
-                    meta = load_json(meta_path) if meta_path.is_file() else {}
-                    if not model_matches(meta):
-                        return None
-                    return {"result": result, "meta": meta, "source": "reused"}
-                except LoopReviewError:
-                    pass
-
-            raw_path = candidate_dir / "raw.stdout"
-            meta_path = candidate_dir / "meta.json"
-            if not raw_path.is_file() or not meta_path.is_file():
-                return None
-            meta = load_json(meta_path)
-            if meta.get("exit_code") != 0 or not model_matches(meta):
-                return None
-            try:
-                parsed = self.reviewers[name].parse_saved_output(
-                    raw_path.read_text(encoding="utf-8")
-                )
-                result = validate_result(
-                    parsed,
-                    prepared["policy_paths"],
-                    active if phase != "discovery" else None,
-                )
-                if phase == "discovery" and result["adjudications"]:
-                    raise LoopReviewError(
-                        "SCHEMA_VALIDATION_FAILED",
-                        "Discovery result must not adjudicate findings",
-                    )
-            except LoopReviewError:
-                return None
-
-            atomic_json(result_path, result)
-            recovered_meta = dict(meta)
-            recovered_meta["status"] = "RECOVERED_FROM_RAW"
-            recovered_meta["reviewer_alias"] = self.aliases[name]
-            if phase != "discovery":
-                recovered_meta["active_finding_ids"] = active
-            atomic_json(meta_path, recovered_meta)
-            error_path = candidate_dir / "error.json"
-            if error_path.is_file():
-                shutil.copy2(error_path, candidate_dir / "error.recovered.json")
-                error_path.unlink()
-            invalid_path = candidate_dir / "result.invalid.json"
-            if invalid_path.is_file():
-                invalid_path.unlink()
-            return {"result": result, "meta": recovered_meta, "source": "recovered"}
-
-        checkpoint = load_checkpoint(out_dir)
-        if checkpoint is not None:
-            return checkpoint
-
-        attempts_dir = out_dir / "attempts"
-        if not attempts_dir.is_dir():
-            return None
-        for attempt_dir in sorted(
-            (p for p in attempts_dir.iterdir() if p.is_dir()),
-            key=lambda p: p.name,
-            reverse=True,
-        ):
-            checkpoint = load_checkpoint(attempt_dir)
-            if checkpoint is None:
+        checkpoint = slot / "checkpoint.json"
+        if checkpoint.exists():
+            saved = load_json(checkpoint)
+            if saved["digest"] == digest:
+                attempt_name = saved["attempt"]
+                if not isinstance(attempt_name, str) or not attempt_name.startswith("attempt-") or Path(attempt_name).name != attempt_name:
+                    raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Invalid checkpoint attempt path")
+                result_path = slot / attempt_name / "result.json"
+                if sha256_file(result_path) != saved["result_sha256"]:
+                    raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Saved result checksum changed")
+                return validate_result(load_json(result_path), prepared["policy_paths"], ids)
+        for attempt in sorted(slot.glob("attempt-*"), reverse=True):
+            call_path, stream_path = attempt / "call.json", attempt / "stream.json"
+            if not call_path.exists() or not stream_path.exists() or load_json(call_path).get("digest") != digest:
                 continue
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for artifact_name in (
-                "prompt.md",
-                "raw.stdout",
-                "raw.stderr",
-                "meta.json",
-                "result.json",
-                "review.md",
-            ):
-                source = attempt_dir / artifact_name
-                if source.is_file():
-                    shutil.copy2(source, out_dir / artifact_name)
-            for stale_name in ("error.json", "result.invalid.json"):
-                stale = out_dir / stale_name
-                if stale.is_file():
-                    stale.unlink()
-            if checkpoint["source"] == "reused":
-                checkpoint["source"] = "reused_attempt"
-            return checkpoint
+            if load_json(stream_path).get("exit_code") != 0:
+                continue
+            try:
+                raw = (attempt / "raw.stdout").read_text()
+                result = validate_result(self.reviewers[name].parse_saved_output(raw), prepared["policy_paths"], ids)
+            except (LoopReviewError, OSError):
+                continue
+            atomic_json(attempt / "result.json", result)
+            atomic_json(checkpoint, {"digest": digest, "attempt": attempt.name,
+                                     "result_sha256": sha256_file(attempt / "result.json")})
+            return result
         return None
 
-    def _execute_review(
-        self,
-        *,
-        run_dir: Path,
-        prepared: Dict[str, Any],
-        state: Dict[str, Any],
-        manifest: Dict[str, Any],
-        reuse_checkpoints: bool,
+    def _worker(
+        self, name: str, phase: str, prepared: Dict[str, Any], claims: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        resume_stats = {
-            "reused_results": 0,
-            "recovered_from_raw": 0,
-            "rerun_calls": 0,
-            "reviewer_migrations": list(state.get("reviewer_migrations", [])),
-        } if reuse_checkpoints else None
-        summaries: List[str] = []
-        model_migrated_names = {
-            "qwen"
-            for item in state.get("reviewer_migrations", [])
-            if item.get("reviewer") == "reviewer-a"
-            and item.get("from_model") != item.get("to_model")
-        }
-
-        preflight_ok = (
-            not state.get("reviewer_migrations")
-            and all(
-                self._preflight_checkpoint_exists(run_dir, name)
-                for name in ("qwen", "deepseek")
-            )
-        )
-        if not reuse_checkpoints or not preflight_ok:
-            state["status"] = "PREFLIGHT"
-            atomic_json(run_dir / "state" / "state.json", state)
-            self._preflight(prepared["repo"], run_dir)
-            self._verify_fingerprint(prepared)
-
-        state["status"] = "DISCOVERY_PARALLEL"
-        atomic_json(run_dir / "state" / "state.json", state)
-        discovery: Dict[str, Dict[str, Any]] = {}
-        missing: List[str] = []
-        checkpoint_dirs: Dict[str, Path] = {}
-
-        for name in ("qwen", "deepseek"):
-            checkpoint = None
-            checkpoint_dir = self._existing_round_dir(run_dir, "00-discovery", name)
-            checkpoint_dirs[name] = checkpoint_dir
-            if reuse_checkpoints:
-                checkpoint = self._checkpoint_result(
-                    name=name,
-                    out_dir=checkpoint_dir,
-                    prepared=prepared,
-                    active=[],
-                    phase="discovery",
-                    required_model=(
-                        self.config["reviewers"][name]["model"]
-                        if name in model_migrated_names
-                        else None
-                    ),
-                )
-            if checkpoint is None:
-                missing.append(name)
+        prompt = self._prompt(prepared, name, phase, claims)
+        cfg_name = "qwen" if name == "reviewer-a" else "deepseek"
+        call_input = {"protocol": "2.0", "prompt": prompt, "fingerprint": prepared["fingerprint"],
+                      "reviewer": self.config["reviewers"][cfg_name]}
+        digest = sha256_bytes(json.dumps(call_input, sort_keys=True, ensure_ascii=False).encode())
+        slot = self.run_dir / "audit" / phase / name
+        ids = [claim["id"] for claim in claims]
+        cached = self._checkpoint(slot, digest, prepared, ids, name)
+        if cached is not None:
+            return cached
+        with self.lock:
+            self._check_budget()
+            if self.state["review_calls"] >= self.config["limits"]["max_task_attempts"]:
+                raise LoopReviewError("RUN_BUDGET_EXCEEDED", "Cumulative reviewer attempt budget exhausted")
+            self.state["review_calls"] += 1
+            attempt = slot / f"attempt-{self.state['review_calls']:03d}"
+            key = f"{phase}/{name}/{attempt.name}"
+            self.state["progress"][key] = {"status": "RUNNING", "total_tokens": None, "reported_cost": None}
+            self._publish()
+        write_text(attempt / "prompt.md", prompt)
+        atomic_json(attempt / "call.json", {"digest": digest})
+        adapter = self.reviewers[name]
+        adapter.limits = self.config["limits"]
+        adapter.progress = lambda stats: self._progress(key, stats)
+        adapter.cancel = self._check_budget
+        response = None
+        try:
+            response = adapter.review(prompt, prepared["repo"], self.run_dir, attempt, prepared["read_dirs"])
+            result = validate_result(response["result"], prepared["policy_paths"], ids)
+            atomic_json(attempt / "result.json", result)
+            atomic_json(attempt / "meta.json", response["meta"])
+            atomic_json(slot / "checkpoint.json", {"digest": digest, "attempt": attempt.name,
+                                                   "result_sha256": sha256_file(attempt / "result.json")})
+            return result
+        except Exception as error:
+            if isinstance(error, LoopReviewError):
+                if response is not None:
+                    atomic_json(attempt / "result.invalid.json", response["result"])
+                atomic_json(attempt / "error.json", {"code": error.code, "message": error.message})
             else:
-                checkpoint["artifact_dir"] = str(checkpoint_dir)
-                discovery[name] = checkpoint
-                assert resume_stats is not None
-                resume_stats[
-                    "recovered_from_raw"
-                    if checkpoint["source"] == "recovered"
-                    else "reused_results"
-                ] += 1
+                write_text(attempt / "exception.txt", traceback.format_exc())
+            raise
+        finally:
+            with self.lock:
+                stream = attempt / "stream.json"
+                if stream.exists():
+                    self.state["progress"][key].update(load_json(stream))
+                self.state["progress"][key]["status"] = "OK" if (attempt / "result.json").exists() else "FAILED"
+                self._publish()
 
-        def discovery_call(name: str) -> Tuple[str, Dict[str, Any]]:
-            out_dir = self._round_dir(run_dir, "00-discovery", name)
-            if reuse_checkpoints:
-                self._archive_failed_slot(checkpoint_dirs[name])
-                if checkpoint_dirs[name] != out_dir:
-                    self._archive_failed_slot(out_dir)
-            response = self._run_worker(
-                name=name,
-                out_dir=out_dir,
-                prepared=prepared,
-                run_dir=run_dir,
-                ledger=None,
-                active=[],
-                phase="discovery",
-            )
-            response["artifact_dir"] = str(out_dir)
-            return name, response
+    def _phase(
+        self, phase: str, prepared: Dict[str, Any], claims: List[Dict[str, Any]],
+        results: Dict[str, Dict[str, Any]],
+    ) -> None:
+        self.state["status"] = phase.upper()
+        self._publish()
+        self.store.indexes()
+        errors = []
+        base_questions = [] if phase == "discovery" else list(self.result["open_questions"])
+        work = {name: ([] if phase == "discovery" else [claim for claim in claims if claim["origin"] != name])
+                for name in self.reviewers}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {pool.submit(self._worker, name, phase, prepared, selected): name
+                       for name, selected in work.items() if phase == "discovery" or selected}
+            for future in concurrent.futures.as_completed(futures):
+                name = futures[future]
+                try:
+                    output = future.result()
+                    with self.lock:
+                        results[name] = output
+                        current = discovery_claims(results) + claims if phase == "discovery" else claims
+                        self.result["findings"] = resolve_claims(current, results if phase == "verification" else {})
+                        self.result["open_questions"] = base_questions + [q for item in results.values() for q in item["open_questions"]]
+                        self._publish()
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise errors[0]
 
-        if missing:
-            state["review_calls"] = int(state.get("review_calls", 0)) + len(missing)
-            if resume_stats is not None:
-                resume_stats["rerun_calls"] += len(missing)
-            atomic_json(run_dir / "state" / "state.json", state)
-            errors: Dict[str, LoopReviewError] = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(missing)) as pool:
-                futures = {pool.submit(discovery_call, name): name for name in missing}
-                for future in concurrent.futures.as_completed(futures):
-                    expected_name = futures[future]
-                    try:
-                        name, response = future.result()
-                        response["source"] = "rerun" if reuse_checkpoints else "new"
-                        discovery[name] = response
-                    except LoopReviewError as e:
-                        errors[expected_name] = e
-                    except Exception as e:
-                        errors[expected_name] = LoopReviewError(
-                            "UNEXPECTED_ERROR",
-                            str(e),
-                            {"exception_type": type(e).__name__},
-                        )
-            self._verify_fingerprint(prepared)
-            if errors:
-                first_name = next(iter(errors))
-                error = errors[first_name]
-                details = dict(error.details)
-                details["reviewer"] = self.aliases[first_name]
-                details["discovery_failures"] = {
-                    name: {"code": item.code, "message": item.message}
-                    for name, item in errors.items()
-                }
-                raise LoopReviewError(error.code, error.message, details)
-
-        ledger = new_ledger()
-        for name in ("qwen", "deepseek"):
-            stable_map = add_discovery_result(
-                ledger, discovery[name]["result"], self.aliases[name]
-            )
-            summaries.append(discovery[name]["result"]["summary"])
-            out_dir = Path(
-                discovery[name].get("artifact_dir")
-                or self._round_dir(run_dir, "00-discovery", name)
-            )
-            write_text(
-                out_dir / "review.md",
-                render_round(discovery[name]["result"], stable_map),
-            )
-            meta = dict(discovery[name].get("meta") or {})
-            meta["reviewer_alias"] = self.aliases[name]
-            atomic_json(out_dir / "meta.json", meta)
-        atomic_json(run_dir / "state" / "issue-ledger.json", ledger)
-
-        state["status"] = "CROSS_CHECK"
-        state["cycles_completed"] = 0
-        atomic_json(run_dir / "state" / "state.json", state)
-        converged = False
-        last_cycle_had_new = False
-        max_cycles = int(manifest["loop"]["max_cycles"])
-        max_calls = int(manifest["loop"]["max_model_calls"])
-
-        for cycle in range(1, max_cycles + 1):
-            cycle_added: List[str] = []
-            order = ("qwen", "deepseek") if cycle == 1 else ("deepseek", "qwen")
-            for name in order:
-                current_active = active_ids(ledger)
-                round_name = f"{cycle:02d}-cross-check"
-                out_dir = self._round_dir(run_dir, round_name, name)
-                checkpoint_dir = self._existing_round_dir(run_dir, round_name, name)
-                checkpoint = None
-                if reuse_checkpoints:
-                    checkpoint = self._checkpoint_result(
-                        name=name,
-                        out_dir=checkpoint_dir,
-                        prepared=prepared,
-                        active=current_active,
-                        phase="cross-check",
-                        required_model=(
-                            self.config["reviewers"][name]["model"]
-                            if name in model_migrated_names
-                            else None
-                        ),
-                    )
-
-                if checkpoint is None:
-                    if not reuse_checkpoints and state["review_calls"] >= max_calls:
-                        raise LoopReviewError(
-                            "MODEL_CALL_BUDGET_EXCEEDED",
-                            "Review model call budget exceeded",
-                        )
-                    if reuse_checkpoints:
-                        self._archive_failed_slot(checkpoint_dir)
-                        if checkpoint_dir != out_dir:
-                            self._archive_failed_slot(out_dir)
-                    state["review_calls"] = int(state.get("review_calls", 0)) + 1
-                    if resume_stats is not None:
-                        resume_stats["rerun_calls"] += 1
-                    atomic_json(run_dir / "state" / "state.json", state)
-                    checkpoint = self._run_worker(
-                        name=name,
-                        out_dir=out_dir,
-                        prepared=prepared,
-                        run_dir=run_dir,
-                        ledger=ledger,
-                        active=current_active,
-                        phase="cross-check",
-                    )
-                    checkpoint["source"] = "rerun" if reuse_checkpoints else "new"
-                    checkpoint["artifact_dir"] = str(out_dir)
-                else:
-                    checkpoint["artifact_dir"] = str(checkpoint_dir)
-                    if resume_stats is not None:
-                        resume_stats[
-                            "recovered_from_raw"
-                            if checkpoint["source"] == "recovered"
-                            else "reused_results"
-                        ] += 1
-
-                out_dir = Path(checkpoint["artifact_dir"])
-
-                stable_map, added = apply_crosscheck_result(
-                    ledger,
-                    checkpoint["result"],
-                    self.aliases[name],
-                    cycle,
-                )
-                cycle_added.extend(added)
-                summaries.append(checkpoint["result"]["summary"])
-                write_text(
-                    out_dir / "review.md",
-                    render_round(checkpoint["result"], stable_map),
-                )
-                meta = dict(checkpoint.get("meta") or {})
-                meta["reviewer_alias"] = self.aliases[name]
-                meta["active_finding_ids"] = current_active
-                atomic_json(out_dir / "meta.json", meta)
-                atomic_json(run_dir / "state" / "issue-ledger.json", ledger)
+    def execute(self, run_dir: Path, *, resume: bool = False, wait_for_launcher: bool = False) -> Dict[str, Any]:
+        self.run_dir = run_dir.resolve()
+        with (self.run_dir / ".run.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait_for_launcher else fcntl.LOCK_NB))
+            except BlockingIOError:
+                raise LoopReviewError("RUN_ALREADY_ACTIVE", "Another controller owns this run")
+            self.state = load_json(self.run_dir / "status.json")
+            allowed = ("FAILED", "CANCELED", "ORPHANED", "RESUMING") if resume else ("PREPARED",)
+            if self.state["status"] not in allowed:
+                raise LoopReviewError("RESUME_NOT_SUPPORTED", "Run is not eligible for this operation")
+            self.result = load_json(self.run_dir / "result.json")
+            self.prior_elapsed = float(self.state["elapsed_seconds"])
+            self.session_started = time.monotonic()
+            discoveries: Dict[str, Dict[str, Any]] = {}
+            verifications: Dict[str, Dict[str, Any]] = {}
+            claims: List[Dict[str, Any]] = []
+            try:
+                prepared, manifest = self._load_prepared_for_resume(self.run_dir)
+                if manifest.get("workflow") != "discovery-verification-v2":
+                    raise LoopReviewError("RESUME_NOT_SUPPORTED", "Legacy workflow is inspection-only")
+                if manifest["reviewers"] != self.config["reviewers"] or manifest["limits"] != self.config["limits"]:
+                    raise LoopReviewError("RESUME_CONFIG_CHANGED", "Model, harness, reasoning or limits changed; start a new run")
+                self._reconcile_usage()
+                for label, path in (("request", prepared["request_path"]),
+                                    ("invocation", self.run_dir / "input" / "invocation.json"),
+                                    ("history", self.run_dir / "input" / "history.json")):
+                    if sha256_file(path) != manifest[f"{label}_sha256"]:
+                        raise LoopReviewError("RESUME_CHECKPOINT_INVALID", f"Persisted {label} changed")
+                if manifest["prompt_sha256"] != self._prompt_fingerprint(prepared):
+                    raise LoopReviewError("RESUME_CONFIG_CHANGED", "Prompt or rubric changed; start a new run")
+                if resume and self.state["status"] != "RESUMING":
+                    archive = self.run_dir / "audit" / "resumes" / secrets.token_hex(4)
+                    atomic_json(archive / "status.json", self.state)
+                    atomic_json(archive / "result.json", load_json(self.run_dir / "result.json"))
+                    # Clear the old request before exposing RESUMING. Detached launchers
+                    # already performed this transition; their new requests must survive.
+                    (self.run_dir / "audit" / "cancel.json").unlink(missing_ok=True)
+                    self.state["status"] = "RESUMING"
+                    self._publish()
+                self.state.pop("failure_code", None)
+                self.state.pop("message", None)
+                history = load_json(self.run_dir / "input" / "history.json")
+                claims = history
+                self._check_budget()
+                if self.state["scope"] == "full":
+                    self._phase("discovery", prepared, history, discoveries)
+                claims = discovery_claims(discoveries) + history
+                self.result["findings"] = resolve_claims(claims, {})
+                self.result["open_questions"] = [q for result in discoveries.values() for q in result["open_questions"]]
+                if claims:
+                    self._phase("verification", prepared, claims, verifications)
+                self.result["findings"] = resolve_claims(claims, verifications)
+                self.result["open_questions"] = [q for result in [*discoveries.values(), *verifications.values()] for q in result["open_questions"]]
                 self._verify_fingerprint(prepared)
+                self._check_budget()
+                self.state["status"] = final_status(self.result["findings"], self.result["open_questions"], self.state["scope"])
+                self._publish()
+                self.store.indexes()
+                return dict(self.state)
+            except Exception as error:
+                if discoveries or claims or verifications:
+                    claims = discovery_claims(discoveries) + (claims if not discoveries else [c for c in claims if c["origin"] == "history"])
+                    self.result["findings"] = resolve_claims(claims, verifications)
+                    self.result["open_questions"] = [q for result in [*discoveries.values(), *verifications.values()] for q in result["open_questions"]]
+                raise self._failure(error)
+            finally:
+                self.session_started = 0.0
 
-            state["cycles_completed"] = cycle
-            last_cycle_had_new = bool(cycle_added)
-            current_active = active_ids(ledger)
-            converged = (not current_active) and ((not last_cycle_had_new) or cycle == max_cycles)
-            atomic_json(run_dir / "state" / "state.json", state)
-            if converged:
-                break
-
-        status = final_status(ledger, converged, last_cycle_had_new)
-        final_json = {
-            "schema_version": "1.0",
-            "status": status,
-            "run_id": state["run_id"],
-            "counts": status_counts(ledger),
-            "accepted_blocking_ids": accepted_blocking_ids(ledger),
-            "cycles": state["cycles_completed"],
-            "review_calls": state["review_calls"],
-            "ledger_path": str((run_dir / "state" / "issue-ledger.json").resolve()),
-        }
-        if resume_stats is not None:
-            final_json["resume"] = resume_stats
-        atomic_json(run_dir / "final" / "review.json", final_json)
-        write_text(run_dir / "final" / "review.md", render_final(status, ledger, summaries))
-
-        status_obj = {
-            "status": status,
-            "run_id": state["run_id"],
-            "run_dir": str(run_dir),
-            "review_path": str((run_dir / "final" / "review.md").resolve()),
-            "review_json_path": str((run_dir / "final" / "review.json").resolve()),
-            "status_path": str((run_dir / "final" / "status.json").resolve()),
-            "blocking_count": len(accepted_blocking_ids(ledger)),
-            "cycles": state["cycles_completed"],
-            "review_calls": state["review_calls"],
-        }
-        if resume_stats is not None:
-            status_obj["resume"] = resume_stats
-        atomic_json(run_dir / "final" / "status.json", status_obj)
-        state["status"] = status
-        state.pop("failure_code", None)
-        atomic_json(run_dir / "state" / "state.json", state)
-        return status_obj
-
-    def _resume_failure(
-        self,
-        run_dir: Path,
-        state: Dict[str, Any],
-        raw_error: Exception,
-    ) -> LoopReviewError:
-        if isinstance(raw_error, LoopReviewError):
-            error = raw_error
-        else:
-            error = LoopReviewError(
-                "UNEXPECTED_ERROR",
-                str(raw_error),
-                {"exception_type": type(raw_error).__name__},
-            )
-        failure = {
-            "status": "FAILED",
-            "failure_code": error.code,
-            "message": error.message,
-            "details": error.details,
-            "run_id": state["run_id"],
-            "run_dir": str(run_dir),
-            "review_path": str((run_dir / "final" / "review.md").resolve()),
-            "status_path": str((run_dir / "final" / "status.json").resolve()),
-            "resumed": True,
-        }
-        write_text(
-            run_dir / "final" / "review.md",
-            f"# Loop Review Failed\n\n**{error.code}**\n\n{error.message}\n",
-        )
-        atomic_json(run_dir / "final" / "status.json", failure)
-        state["status"] = "FAILED"
-        state["failure_code"] = error.code
-        atomic_json(run_dir / "state" / "state.json", state)
-        error.details = dict(error.details)
-        error.details.update({
-            "run_dir": str(run_dir),
-            "status_path": str((run_dir / "final" / "status.json").resolve()),
-        })
+    def _failure(self, raw: Exception) -> LoopReviewError:
+        error = raw if isinstance(raw, LoopReviewError) else LoopReviewError("UNEXPECTED_ERROR", str(raw))
+        self.state["status"] = "CANCELED" if error.code == "CANCELED" else "FAILED"
+        self.state["failure_code"] = error.code
+        self.state["message"] = error.message
+        self._publish()
+        self.store.indexes()
+        error.details = {"run_dir": str(self.run_dir), "run_id": self.state["run_id"],
+                         "status_path": str(self.run_dir / "status.json"), "report_path": str(self.run_dir / "report.md")}
         return error
 
-    def resume(self, run_dir: Path) -> Dict[str, Any]:
-        """Resume a failed run from durable reviewer/result checkpoints."""
-        run_dir = run_dir.resolve()
-        failure = load_json(run_dir / "final" / "status.json")
-        state = load_json(run_dir / "state" / "state.json")
-        if failure.get("status") != "FAILED" or state.get("status") != "FAILED":
-            raise LoopReviewError("RESUME_NOT_SUPPORTED", "Run is not in FAILED state")
-        if state.get("run_dir") != str(run_dir):
-            raise LoopReviewError("RESUME_CHECKPOINT_INVALID", "Run state path is inconsistent")
-
-        self._archive_resume_snapshot(run_dir)
-        try:
-            prepared, manifest = self._load_prepared_for_resume(run_dir)
-            reviewer_migrations = self._verify_resume_config(manifest)
-            state["status"] = "RESUMING"
-            if reviewer_migrations:
-                state["reviewer_migrations"] = reviewer_migrations
-            state["resume_count"] = int(state.get("resume_count", 0)) + 1
-            state.pop("failure_code", None)
-            atomic_json(run_dir / "state" / "state.json", state)
-
-            return self._execute_review(
-                run_dir=run_dir,
-                prepared=prepared,
-                state=state,
-                manifest=manifest,
-                reuse_checkpoints=True,
-            )
-        except Exception as raw_error:
-            raise self._resume_failure(run_dir, state, raw_error)
-
     def run(self, invocation_path: Path, dry_run: bool = False) -> Dict[str, Any]:
-        invocation = load_json(invocation_path)
-        if not isinstance(invocation, dict):
-            raise LoopReviewError("INVALID_INVOCATION", "Invocation must be a JSON object")
-        repo_raw = invocation.get("repo")
-        if not isinstance(repo_raw, str):
-            raise LoopReviewError("INVALID_INVOCATION", "repo is required")
-        repo = ensure_repo(expand_path(repo_raw))
-        mode = invocation.get("mode")
-        if mode not in ("design", "code", "review"):
-            raise LoopReviewError("INVALID_INVOCATION", "mode must be design, code, or review")
-        run_id, run_dir = self._new_run_dir(repo, mode)
+        prepared = self.prepare(invocation_path, dry_run)
+        return prepared if dry_run else self.execute(Path(prepared["run_dir"]))
 
-        state = {
-            "run_id": run_id,
-            "status": "INIT",
-            "review_calls": 0,
-            "cycles_completed": 0,
-            "run_dir": str(run_dir),
-        }
-        atomic_json(run_dir / "state" / "state.json", state)
-        try:
-            prepared = self._prepare(invocation, run_dir, repo)
-            manifest = {
-                "schema_version": "1.0",
-                "run_id": run_id,
-                "started_at": datetime.now().astimezone().isoformat(),
-                "mode": mode,
-                "repo": repo_meta(repo),
-                "loop": copy.deepcopy(self.config["loop"]),
-                "reviewers": {
-                    "reviewer-a": {
-                        "adapter": self.config["reviewers"]["qwen"]["adapter"],
-                        "model": self.config["reviewers"]["qwen"]["model"],
-                        "reasoning": self.config["reviewers"]["qwen"]["reasoning"],
-                        "timeout_seconds": int(self.config["reviewers"]["qwen"]["timeout_seconds"]),
-                    },
-                    "reviewer-b": {
-                        "adapter": self.config["reviewers"]["deepseek"]["adapter"],
-                        "model": self.config["reviewers"]["deepseek"]["model"],
-                        "reasoning": self.config["reviewers"]["deepseek"]["reasoning"],
-                        "timeout_seconds": int(self.config["reviewers"]["deepseek"]["timeout_seconds"]),
-                    },
-                },
-            }
-            atomic_json(run_dir / "manifest.json", manifest)
-
-            state["status"] = "PREPARED"
-            atomic_json(run_dir / "state" / "state.json", state)
-
-            if dry_run:
-                ledger = new_ledger()
-                for name in ("qwen", "deepseek"):
-                    out_dir = run_dir / "rounds" / "00-discovery" / name
-                    prompt = build_prompt(
-                        skill_root=self.skill_root,
-                        mode=prepared["mode"],
-                        request_text=prepared["request_text"],
-                        target_description=prepared["target_description"],
-                        policy_paths=prepared["policy_paths"],
-                        ledger=None,
-                        active_ids=[],
-                        prior_reviews=[],
-                        phase="discovery",
-                        reviewer_alias=self.aliases[name],
-                        seed_review_path=str(prepared["seed_review_path"]) if prepared.get("seed_review_path") else None,
-                    )
-                    write_text(out_dir / "prompt.md", prompt)
-                atomic_json(run_dir / "state" / "issue-ledger.json", ledger)
-                status_obj = {
-                    "status": "PREPARED_DRY_RUN",
-                    "run_id": run_id,
-                    "run_dir": str(run_dir),
-                    "review_path": None,
-                    "status_path": str((run_dir / "final" / "status.json").resolve()),
-                }
-                atomic_json(run_dir / "final" / "status.json", status_obj)
-                return status_obj
-
-            return self._execute_review(
-                run_dir=run_dir,
-                prepared=prepared,
-                state=state,
-                manifest=manifest,
-                reuse_checkpoints=False,
-            )
-
-        except Exception as raw_error:
-            if isinstance(raw_error, LoopReviewError):
-                error = raw_error
-            else:
-                error = LoopReviewError(
-                    "UNEXPECTED_ERROR",
-                    str(raw_error),
-                    {"exception_type": type(raw_error).__name__},
-                )
-            failure = {
-                "status": "FAILED",
-                "failure_code": error.code,
-                "message": error.message,
-                "details": error.details,
-                "run_id": run_id,
-                "run_dir": str(run_dir),
-                "review_path": str((run_dir / "final" / "review.md").resolve()),
-                "status_path": str((run_dir / "final" / "status.json").resolve()),
-            }
-            write_text(
-                run_dir / "final" / "review.md",
-                f"# Loop Review Failed\n\n**{error.code}**\n\n{error.message}\n",
-            )
-            atomic_json(run_dir / "final" / "status.json", failure)
-            state["status"] = "FAILED"
-            state["failure_code"] = error.code
-            atomic_json(run_dir / "state" / "state.json", state)
-            error.details = dict(error.details)
-            error.details.update({
-                "run_dir": str(run_dir),
-                "status_path": str((run_dir / "final" / "status.json").resolve()),
-            })
-            raise error
+    def resume(self, run_dir: Path) -> Dict[str, Any]:
+        return self.execute(run_dir, resume=True)
