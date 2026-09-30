@@ -21,7 +21,7 @@ def provider_failure_stream():
             "message": {
                 "role": "assistant",
                 "provider": "openrouter",
-                "model": "z-ai/glm-5.3-flash",
+                "model": "qwen/qwen3.8-flash",
                 "stopReason": "error",
                 "errorMessage": "terminated",
                 "content": [{"type": "text", "text": '{"schema_version":"1.0","summary":"partial'}],
@@ -42,7 +42,7 @@ def provider_failure_stream():
             "message": {
                 "role": "assistant",
                 "provider": "openrouter",
-                "model": "z-ai/glm-5.3-flash",
+                "model": "qwen/qwen3.8-flash",
                 "stopReason": "error",
                 "errorMessage": "Request timed out.",
                 "content": [],
@@ -70,7 +70,7 @@ def recovered_retry_stream(result):
             "message": {
                 "role": "assistant",
                 "provider": "openrouter",
-                "model": "z-ai/glm-5.3-flash",
+                "model": "qwen/qwen3.8-flash",
                 "stopReason": "error",
                 "errorMessage": "Connection error.",
                 "content": [],
@@ -83,7 +83,7 @@ def recovered_retry_stream(result):
             "message": {
                 "role": "assistant",
                 "provider": "openrouter",
-                "model": "z-ai/glm-5.3-flash",
+                "model": "qwen/qwen3.8-flash",
                 "stopReason": "stop",
                 "content": [{"type": "text", "text": json.dumps(result)}],
                 "usage": {"cost": {"total": 0.01}},
@@ -116,7 +116,7 @@ def event_stream(result, *, repeated=False):
         "message": {
             "role": "assistant",
             "provider": "openrouter",
-            "model": "z-ai/glm-5.3-flash",
+            "model": "qwen/qwen3.8-flash",
             "content": [{"type": "text", "text": json.dumps(result)}],
             "usage": {
                 "input": 100,
@@ -135,9 +135,9 @@ def event_stream(result, *, repeated=False):
 
 class PiAdapterTests(unittest.TestCase):
     def setUp(self):
-        self.adapter = PiAdapter("glm", {
-            "executable": "/fake/pi-glm",
-            "model": "z-ai/glm-5.3-flash",
+        self.adapter = PiAdapter("qwen", {
+            "executable": "/fake/pi-openrouter",
+            "model": "qwen/qwen3.8-flash",
             "reasoning": "high",
             "timeout_seconds": 10,
         })
@@ -171,7 +171,7 @@ class PiAdapterTests(unittest.TestCase):
         argv = captured["argv"]
         pairs = list(zip(argv, argv[1:]))
         self.assertIn(("--provider", "openrouter"), pairs)
-        self.assertIn(("--model", "z-ai/glm-5.3-flash"), pairs)
+        self.assertIn(("--model", "qwen/qwen3.8-flash"), pairs)
         self.assertIn(("--thinking", "high"), pairs)
         self.assertIn(("--tools", "read,grep,find,ls"), pairs)
         self.assertNotIn("bash", argv)
@@ -260,9 +260,9 @@ class PiAdapterTests(unittest.TestCase):
             "timed out",
             {"stdout": partial, "stderr": "partial-error", "timeout_seconds": 2},
         )
-        adapter = PiAdapter("glm", {
-            "executable": "/fake/pi-glm",
-            "model": "z-ai/glm-5.3-flash",
+        adapter = PiAdapter("qwen", {
+            "executable": "/fake/pi-openrouter",
+            "model": "qwen/qwen3.8-flash",
             "reasoning": "high",
             "timeout_seconds": 2,
         })

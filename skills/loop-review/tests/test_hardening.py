@@ -21,11 +21,11 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "pi"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "pi"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             cfg = load_config(p)
-            self.assertEqual(cfg["reviewers"]["glm"]["executable"], "pi")
+            self.assertEqual(cfg["reviewers"]["qwen"]["executable"], "pi")
             self.assertEqual(cfg["reviewers"]["deepseek"]["executable"], "claude")
 
     def test_config_rejects_adapter_mismatch(self):
@@ -35,7 +35,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             with self.assertRaises(LoopReviewError):
@@ -138,7 +138,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -164,7 +164,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(repo / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -188,7 +188,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -209,7 +209,7 @@ class HardeningTests(unittest.TestCase):
             status = json.loads((run_dir / "final" / "status.json").read_text())
             self.assertEqual(status["failure_code"], "UNEXPECTED_ERROR")
 
-    def test_resume_allows_known_glm_harness_migration(self):
+    def test_resume_allows_known_reviewer_a_harness_migration(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             cfg_path = td / "config.toml"
@@ -217,7 +217,7 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "z-ai/glm-5.3-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
@@ -225,7 +225,7 @@ class HardeningTests(unittest.TestCase):
                 "reviewers": {
                     "reviewer-a": {
                         "adapter": "opencode",
-                        "model": "openrouter/z-ai/glm-5.3-flash",
+                        "model": "openrouter/qwen/qwen3.8-flash",
                         "reasoning": "high",
                     },
                     "reviewer-b": {
@@ -240,7 +240,7 @@ class HardeningTests(unittest.TestCase):
                 "reviewer": "reviewer-a",
                 "from_adapter": "opencode",
                 "to_adapter": "pi",
-                "model": "z-ai/glm-5.3-flash",
+                "model": "qwen/qwen3.8-flash",
             }])
 
     def test_resume_reads_legacy_reviewer_a_artifact_paths(self):
@@ -251,27 +251,30 @@ class HardeningTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
             run_dir = td / "run"
-            legacy = run_dir / "rounds" / "00-discovery" / "grok"
-            legacy.mkdir(parents=True)
+            legacy_grok = run_dir / "rounds" / "00-discovery" / "grok"
+            legacy_grok.mkdir(parents=True)
+            legacy_glm = run_dir / "rounds" / "00-discovery" / "glm"
+            legacy_glm.mkdir(parents=True)
             preflight = run_dir / "preflight"
             preflight.mkdir(parents=True)
             (preflight / "grok.json").write_text("{}")
+            (preflight / "glm.json").write_text("{}")
 
             self.assertEqual(
-                controller._existing_round_dir(run_dir, "00-discovery", "glm"),
-                legacy,
+                controller._existing_round_dir(run_dir, "00-discovery", "qwen"),
+                legacy_glm,
             )
-            self.assertTrue(controller._preflight_checkpoint_exists(run_dir, "glm"))
+            self.assertTrue(controller._preflight_checkpoint_exists(run_dir, "qwen"))
 
-            canonical = run_dir / "rounds" / "00-discovery" / "glm"
+            canonical = run_dir / "rounds" / "00-discovery" / "qwen"
             canonical.mkdir()
             self.assertEqual(
-                controller._existing_round_dir(run_dir, "00-discovery", "glm"),
+                controller._existing_round_dir(run_dir, "00-discovery", "qwen"),
                 canonical,
             )
 

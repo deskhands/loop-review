@@ -30,7 +30,7 @@ class DryRunTests(unittest.TestCase):
                 'version = 1\n'
                 '[paths]\nrun_root = "' + str(Path(td) / "runs") + '"\n'
                 '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.glm]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
                 '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
             )
             cfg = load_config(cfg_path)
@@ -48,7 +48,7 @@ class DryRunTests(unittest.TestCase):
             self.assertEqual(result["status"], "PREPARED_DRY_RUN")
             run_dir = Path(result["run_dir"])
             self.assertEqual((run_dir / "input" / "target.md").read_text(), "# Design\nSimple.")
-            prompt = (run_dir / "rounds" / "00-discovery" / "glm" / "prompt.md").read_text()
+            prompt = (run_dir / "rounds" / "00-discovery" / "qwen" / "prompt.md").read_text()
             self.assertIn(str((root / "AGENTS.md").resolve()), prompt)
             self.assertIn("Review verbatim.", prompt)
             self.assertIn("rule_refs is reserved exclusively", prompt)

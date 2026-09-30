@@ -89,7 +89,7 @@ You need:
 
 The default example configuration uses:
 
-- GLM-5.3 Flash via Pi + OpenRouter with `high` reasoning
+- Qwen3.8-Flash via Pi + OpenRouter with `high` reasoning
 - DeepSeek via Claude Code + DeepSeek official with `max` reasoning
 
 Model identifiers and executable locations are configurable. Reviewer A passes provider/model/reasoning explicitly to Pi, so a user's ordinary Pi default can remain on another provider/model without affecting `loop-review`.
@@ -120,10 +120,10 @@ run_root = "~/code/agents-tmp/loop-review"
 max_cycles = 2
 max_model_calls = 6
 
-[reviewers.glm]
+[reviewers.qwen]
 adapter = "pi"
 executable = "pi"
-model = "z-ai/glm-5.3-flash"
+model = "qwen/qwen3.8-flash"
 reasoning = "high"
 timeout_seconds = 1800
 
@@ -135,7 +135,7 @@ reasoning = "max"
 timeout_seconds = 1800
 ```
 
-The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Reviewer A uses Pi in ephemeral JSON mode with extensions/skills/project context disabled and only `read,grep,find,ls` enabled; its raw JSON event stream is retained for audit, including turn/tool/cost metadata. Reviewer B uses Claude Code with `Read,Glob,Grep` only. The Reviewer A configuration key is `[reviewers.glm]`; the historical `grok` name is only recognized when resuming old run artifacts created before the rename.
+The reviewer timeouts are hard wall-clock ceilings, not target runtimes. Reviewer A uses Pi in ephemeral JSON mode with extensions/skills/project context disabled and only `read,grep,find,ls` enabled; its raw JSON event stream is retained for audit, including turn/tool/cost metadata. Reviewer B uses Claude Code with `Read,Glob,Grep` only. The Reviewer A configuration key is `[reviewers.qwen]`; historical `glm`/`grok` round and preflight artifact names are recognized read-only for legacy runs.
 
 If a reviewer times out, `loop-review` fails closed but preserves partial `raw.stdout`, `raw.stderr`, `meta.json`, and `error.json` in that round directory for diagnosis. Blind-discovery workers are collected in completion order, so a peer result that finishes successfully is retained even if the other reviewer later fails.
 
@@ -202,7 +202,7 @@ python3 "$SKILL_ROOT/scripts/loop_review.py" resume --job <job_id>
 
 Resume is detached by default and keeps the same `job_id`. It replays the normal review state machine from durable artifacts: an already validated `result.json` is reused, an exit-0 `raw.stdout` is recovered without another model call when it now parses and validates, and only a reviewer slot with no reusable checkpoint is called again. This means a failure after several expensive calls does not throw those successful calls away.
 
-Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if reviewer model/reasoning changed. Adapter changes also fail closed except for the audited legacy Reviewer-A OpenCode/Claude-to-Pi migration of the same canonical GLM model; that migration forces a fresh preflight and is recorded in resume metadata. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, actual rerun calls, and any recorded reviewer migration.
+Resume fails closed if the repository/target/`AGENTS.md` fingerprint changed or if reviewer model/reasoning changed. Adapter changes also fail closed except for an audited Reviewer-A OpenCode/Claude-to-Pi harness migration of the same canonical model; that migration forces a fresh preflight and is recorded in resume metadata. Previous terminal state and failed retry artifacts are retained for audit. The returned `resume` counters show reused results, raw-output recoveries, actual rerun calls, and any recorded reviewer migration.
 
 If the exact job id was lost, `status` without `--job` resolves the most recent detached job. `--dry-run` remains synchronous, and `--foreground` is available only for explicit debugging/manual synchronous execution. The older `--detach` flag remains accepted as a compatibility alias for the default behavior.
 
@@ -274,4 +274,4 @@ npx skills update
 
 ## Status
 
-The Skill is functional and has been exercised with real Pi/OpenRouter/GLM and Claude Code/DeepSeek-official reviewer calls. Before making this repository public, choose and add an explicit open-source license.
+The Skill is functional and has been exercised with real Pi/OpenRouter/Qwen and Claude Code/DeepSeek-official reviewer calls. Before making this repository public, choose and add an explicit open-source license.

@@ -48,10 +48,10 @@ class LoopReviewController:
         self.config = config
         self.skill_root = skill_root.resolve()
         self.reviewers = {
-            "glm": PiAdapter("glm", config["reviewers"]["glm"]),
+            "qwen": PiAdapter("qwen", config["reviewers"]["qwen"]),
             "deepseek": ClaudeAdapter("deepseek", config["reviewers"]["deepseek"]),
         }
-        self.aliases = {"glm": "Reviewer-A", "deepseek": "Reviewer-B"}
+        self.aliases = {"qwen": "Reviewer-A", "deepseek": "Reviewer-B"}
 
     def doctor(self, cwd: Optional[Path] = None) -> Dict[str, Any]:
         cwd = (cwd or Path.home()).resolve()
@@ -310,17 +310,21 @@ class LoopReviewController:
         canonical = self._round_dir(run_dir, round_name, name)
         if canonical.exists():
             return canonical
-        if name == "glm":
-            legacy = run_dir / "rounds" / round_name / "grok"
-            if legacy.exists():
-                return legacy
+        if name == "qwen":
+            for legacy_name in ("glm", "grok"):
+                legacy = run_dir / "rounds" / round_name / legacy_name
+                if legacy.exists():
+                    return legacy
         return canonical
 
     def _preflight_checkpoint_exists(self, run_dir: Path, name: str) -> bool:
         canonical = run_dir / "preflight" / f"{name}.json"
         if canonical.is_file():
             return True
-        return name == "glm" and (run_dir / "preflight" / "grok.json").is_file()
+        return name == "qwen" and any(
+            (run_dir / "preflight" / f"{legacy_name}.json").is_file()
+            for legacy_name in ("glm", "grok")
+        )
 
     def _prior_review_paths(self, run_dir: Path) -> List[str]:
         return sorted(str(p.resolve()) for p in (run_dir / "rounds").glob("**/review.md"))
@@ -508,7 +512,7 @@ class LoopReviewController:
 
     def _verify_resume_config(self, manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
         mapping = {
-            "reviewer-a": "glm",
+            "reviewer-a": "qwen",
             "reviewer-b": "deepseek",
         }
         saved = manifest.get("reviewers")
@@ -698,7 +702,7 @@ class LoopReviewController:
             not state.get("reviewer_migrations")
             and all(
                 self._preflight_checkpoint_exists(run_dir, name)
-                for name in ("glm", "deepseek")
+                for name in ("qwen", "deepseek")
             )
         )
         if not reuse_checkpoints or not preflight_ok:
@@ -713,7 +717,7 @@ class LoopReviewController:
         missing: List[str] = []
         checkpoint_dirs: Dict[str, Path] = {}
 
-        for name in ("glm", "deepseek"):
+        for name in ("qwen", "deepseek"):
             checkpoint = None
             checkpoint_dir = self._existing_round_dir(run_dir, "00-discovery", name)
             checkpoint_dirs[name] = checkpoint_dir
@@ -790,7 +794,7 @@ class LoopReviewController:
                 raise LoopReviewError(error.code, error.message, details)
 
         ledger = new_ledger()
-        for name in ("glm", "deepseek"):
+        for name in ("qwen", "deepseek"):
             stable_map = add_discovery_result(
                 ledger, discovery[name]["result"], self.aliases[name]
             )
@@ -818,7 +822,7 @@ class LoopReviewController:
 
         for cycle in range(1, max_cycles + 1):
             cycle_added: List[str] = []
-            order = ("glm", "deepseek") if cycle == 1 else ("deepseek", "glm")
+            order = ("qwen", "deepseek") if cycle == 1 else ("deepseek", "qwen")
             for name in order:
                 current_active = active_ids(ledger)
                 round_name = f"{cycle:02d}-cross-check"
@@ -1035,10 +1039,10 @@ class LoopReviewController:
                 "loop": copy.deepcopy(self.config["loop"]),
                 "reviewers": {
                     "reviewer-a": {
-                        "adapter": self.config["reviewers"]["glm"]["adapter"],
-                        "model": self.config["reviewers"]["glm"]["model"],
-                        "reasoning": self.config["reviewers"]["glm"]["reasoning"],
-                        "timeout_seconds": int(self.config["reviewers"]["glm"]["timeout_seconds"]),
+                        "adapter": self.config["reviewers"]["qwen"]["adapter"],
+                        "model": self.config["reviewers"]["qwen"]["model"],
+                        "reasoning": self.config["reviewers"]["qwen"]["reasoning"],
+                        "timeout_seconds": int(self.config["reviewers"]["qwen"]["timeout_seconds"]),
                     },
                     "reviewer-b": {
                         "adapter": self.config["reviewers"]["deepseek"]["adapter"],
@@ -1055,7 +1059,7 @@ class LoopReviewController:
 
             if dry_run:
                 ledger = new_ledger()
-                for name in ("glm", "deepseek"):
+                for name in ("qwen", "deepseek"):
                     out_dir = run_dir / "rounds" / "00-discovery" / name
                     prompt = build_prompt(
                         skill_root=self.skill_root,

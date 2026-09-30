@@ -7,11 +7,11 @@ run_root = "~/code/agents-tmp/loop-review"
 max_cycles = 2
 max_model_calls = 6
 
-# Pi reviewer for OpenRouter/GLM. Configure Pi/OpenRouter auth separately.
-[reviewers.glm]
+# Pi reviewer for OpenRouter/Qwen. Configure Pi/OpenRouter auth separately.
+[reviewers.qwen]
 adapter = "pi"
 executable = "pi"
-model = "z-ai/glm-5.3-flash"
+model = "qwen/qwen3.8-flash"
 reasoning = "high"
 timeout_seconds = 1800
 
