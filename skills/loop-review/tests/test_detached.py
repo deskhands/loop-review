@@ -1,311 +1,96 @@
-import importlib.util
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
-import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
 
-ROOT = Path(__file__).resolve().parents[1]
-CLI_PATH = ROOT / "scripts" / "loop_review.py"
-SPEC = importlib.util.spec_from_file_location("loop_review_cli", CLI_PATH)
-CLI = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(CLI)
+from support import ReviewCase, SKILL
 
 
-class DetachedCliTests(unittest.TestCase):
-    def test_orphaned_job_is_detected_without_resume(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg = {"paths": {"run_root": str(td / "runs")}}
-            jobs = CLI._jobs_dir(cfg)
-            job_id = "deadbeef"
-            stdout_path = jobs / f"{job_id}.stdout"
-            stderr_path = jobs / f"{job_id}.stderr"
-            stdout_path.write_text("")
-            stderr_path.write_text("")
-            CLI.atomic_json(jobs / f"{job_id}.json", {
-                "job_id": job_id,
-                "pid": 99999999,
-                "started_at": "2026-09-24T00:00:00+00:00",
-                "invocation": str(td / "invocation.json"),
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-            })
-            status = CLI._detached_status(cfg, job_id)
-            self.assertEqual(status["status"], "ORPHANED")
+class DetachedTests(ReviewCase):
+    def cli(self, *args, check=True):
+        return subprocess.run([sys.executable, str(SKILL / 'scripts' / 'loop_review.py'), '--config', str(self.config_path), *args],
+                              capture_output=True, text=True, check=check)
 
-    def test_finished_job_returns_controller_result(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg = {"paths": {"run_root": str(td / "runs")}}
-            jobs = CLI._jobs_dir(cfg)
-            job_id = "cafebabe"
-            stdout_path = jobs / f"{job_id}.stdout"
-            stderr_path = jobs / f"{job_id}.stderr"
-            stdout_path.write_text(json.dumps({
-                "status": "FROZEN_PASS",
-                "run_id": "abc123",
-                "run_dir": "/tmp/run",
-            }))
-            stderr_path.write_text("")
-            CLI.atomic_json(jobs / f"{job_id}.json", {
-                "job_id": job_id,
-                "pid": 99999999,
-                "started_at": "2026-09-24T00:00:00+00:00",
-                "invocation": str(td / "invocation.json"),
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-            })
-            status = CLI._detached_status(cfg, job_id)
-            self.assertEqual(status["status"], "FROZEN_PASS")
-            self.assertEqual(status["job_id"], job_id)
+    def fake_executables(self, delay=0):
+        program = self.base / 'fake-reviewer'
+        program.write_text(f'''#!{sys.executable}
+import json, re, sys, time
+prompt = sys.argv[-1]
+policies = json.loads(prompt.split('[APPLICABLE AGENTS.md]\\n')[1].split('\\n\\n[CURRENT TARGET]')[0])
+output = {{'schema_version': '2.0', 'summary': 'No issues.', 'policies_checked': policies,
+          'findings': [], 'adjudications': [], 'open_questions': []}}
+if '--provider' in sys.argv:
+    print(json.dumps({{'type': 'turn_start'}}), flush=True)
+    time.sleep({delay})
+    print(json.dumps({{'type': 'message_end', 'message': {{'role': 'assistant', 'stopReason': 'stop',
+          'content': [{{'type': 'text', 'text': json.dumps(output)}}],
+          'usage': {{'totalTokens': 100, 'cost': {{'total': 0.01}}}}}}}}), flush=True)
+else:
+    print(json.dumps({{'type': 'assistant', 'message': {{'id': 'one', 'content': [], 'usage': {{'input_tokens': 30}}}}}}), flush=True)
+    time.sleep({delay})
+    print(json.dumps({{'type': 'result', 'is_error': False, 'structured_output': output,
+          'num_turns': 1, 'usage': {{'input_tokens': 30, 'output_tokens': 10}}}}), flush=True)
+''')
+        program.chmod(0o755)
+        self.config_path.write_text(self.config_path.read_text().replace('/bin/false', str(program)))
 
-    def _make_repo_and_invocation(self, td):
-        repo = td / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-        (repo / "AGENTS.md").write_text("Keep it simple.\n")
-        target = repo / "design.md"
-        target.write_text("# Design\nChange one word.\n")
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    def wait_terminal(self, run_id, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = json.loads(self.cli('status', '--run', run_id, '--json').stdout)
+            if state['status'] not in ('INIT', 'PREPARED', 'RESUMING', 'DISCOVERY', 'VERIFICATION'):
+                return state
+            time.sleep(0.1)
+        self.fail('Detached controller did not terminate')
 
-        inv = td / "invocation.json"
-        inv.write_text(json.dumps({
-            "schema_version": "1.0",
-            "mode": "design",
-            "repo": str(repo),
-            "request": {"kind": "text", "content": "Review it."},
-            "target": {"kind": "file", "path": str(target)},
-        }))
-        return repo, inv
+    def test_detached_run_has_one_id_live_status_and_terminal_report(self):
+        self.fake_executables(delay=0.4)
+        state = json.loads(self.cli('run', '--invocation', str(self.invocation()), '--json').stdout)
+        self.assertEqual(state['launch_status'], 'STARTED')
+        self.assertEqual(state['run_id'], state['job_id'])
+        final = self.wait_terminal(state['run_id'])
+        self.assertEqual(final['status'], 'FROZEN_PASS')
+        self.assertEqual(final['review_calls'], 2)
+        self.assertEqual(sum(item['total_tokens'] for item in final['progress'].values()), 140)
+        human = self.cli('status', '--run', state['run_id']).stdout
+        self.assertIn('Completed: no confirmed blocking findings', human)
+        listing = json.loads(self.cli('list', '--repo', str(self.repo), '--json').stdout)
+        self.assertEqual(listing['runs'][0]['run_id'], state['run_id'])
 
-    def _write_config(self, td, glm_executable="claude", deepseek_executable="claude"):
-        run_root = td / "runs"
-        cfg = td / "config.toml"
-        cfg.write_text(
-            'version = 1\n'
-            '[paths]\nrun_root = "' + str(run_root) + '"\n'
-            '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-            '[reviewers.qwen]\nadapter = "pi"\nexecutable = "' + glm_executable + '"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
-            '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "' + deepseek_executable + '"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-        )
-        return cfg
+    def test_cancel_stops_workers_and_can_resume_with_remaining_budget(self):
+        self.fake_executables(delay=2)
+        state = json.loads(self.cli('run', '--invocation', str(self.invocation()), '--json').stdout)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = json.loads(self.cli('status', '--run', state['run_id'], '--json').stdout)
+            if current['status'] == 'DISCOVERY' and current['review_calls'] == 2:
+                break
+            time.sleep(0.05)
+        self.cli('cancel', '--run', state['run_id'])
+        canceled = self.wait_terminal(state['run_id'])
+        self.assertEqual(canceled['status'], 'CANCELED')
+        resumed = json.loads(self.cli('resume', '--run', state['run_id'], '--json').stdout)
+        self.assertEqual(resumed['launch_status'], 'RESUME_STARTED')
+        final = self.wait_terminal(state['run_id'])
+        self.assertEqual(final['status'], 'FROZEN_PASS')
+        self.assertEqual(final['review_calls'], 4)
 
-    def test_dry_run_stays_foreground_by_default(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, inv = self._make_repo_and_invocation(td)
-            cfg = self._write_config(td)
+    def test_orphan_detection_uses_run_state_not_old_controller_stdout(self):
+        state = self.controller.prepare(self.invocation())
+        directory = Path(state['run_dir'])
+        (directory / 'audit').mkdir(exist_ok=True)
+        (directory / 'audit' / 'job.json').write_text(json.dumps({'pid': 99999999}))
+        (directory / 'audit' / 'controller.stdout').write_text(json.dumps({'status': 'FROZEN_PASS'}))
+        current = json.loads(self.cli('status', '--run', state['run_id'], '--json').stdout)
+        self.assertEqual(current['status'], 'ORPHANED')
+        self.assertIn('Incomplete', (directory / 'report.md').read_text())
 
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(CLI_PATH),
-                    "--config",
-                    str(cfg),
-                    "run",
-                    "--invocation",
-                    str(inv),
-                    "--dry-run",
-                ],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            result = json.loads(completed.stdout)
-            self.assertEqual(result["status"], "PREPARED_DRY_RUN")
-            self.assertTrue(Path(result["run_dir"]).is_dir())
-            self.assertFalse((td / "runs" / "_jobs").exists())
-
-    def test_real_run_is_detached_by_default(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            _, inv = self._make_repo_and_invocation(td)
-            cfg = self._write_config(td, "/bin/false", "/bin/false")
-
-            launched = subprocess.run(
-                [
-                    sys.executable,
-                    str(CLI_PATH),
-                    "--config",
-                    str(cfg),
-                    "run",
-                    "--invocation",
-                    str(inv),
-                ],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            start = json.loads(launched.stdout)
-            self.assertEqual(start["status"], "STARTED")
-            self.assertIn(str(cfg), start["status_command"])
-            job_id = start["job_id"]
-
-            final = None
-            for _ in range(100):
-                checked = subprocess.run(
-                    [
-                        sys.executable,
-                        str(CLI_PATH),
-                        "--config",
-                        str(cfg),
-                        "status",
-                        "--job",
-                        job_id,
-                    ],
-                    check=True,
-                    text=True,
-                    capture_output=True,
-                )
-                final = json.loads(checked.stdout)
-                if final["status"] != "RUNNING":
-                    break
-                time.sleep(0.05)
-
-            self.assertIsNotNone(final)
-            self.assertEqual(final["status"], "FAILED")
-            self.assertEqual(final["failure_code"], "FAILED_PREFLIGHT")
-
-
-    def test_resume_is_detached_by_default_and_reuses_job_id(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg = {"paths": {"run_root": str(td / "runs")}}
-            jobs = CLI._jobs_dir(cfg)
-            run_dir = td / "runs" / "failed-run"
-            run_dir.mkdir(parents=True)
-            job_id = "1234abcd"
-            stdout_path = jobs / f"{job_id}.stdout"
-            stderr_path = jobs / f"{job_id}.stderr"
-            stdout_path.write_text("")
-            stderr_path.write_text(json.dumps({
-                "status": "FAILED",
-                "failure_code": "TIMEOUT",
-                "message": "failed",
-                "details": {"run_dir": str(run_dir)},
-            }))
-            CLI.atomic_json(jobs / f"{job_id}.json", {
-                "job_id": job_id,
-                "pid": 99999999,
-                "started_at": "2026-09-24T00:00:00+00:00",
-                "invocation": str(td / "invocation.json"),
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-            })
-            args = SimpleNamespace(
-                job=job_id,
-                config=str(td / "config.toml"),
-            )
-            proc = Mock()
-            proc.pid = 4242
-            with patch.object(CLI.subprocess, "Popen", return_value=proc) as popen:
-                result = CLI._start_resume_detached(args, cfg)
-
-            self.assertEqual(result["status"], "RESUME_STARTED")
-            self.assertEqual(result["job_id"], job_id)
-            self.assertEqual(result["run_dir"], str(run_dir.resolve()))
-            record = json.loads((jobs / f"{job_id}.json").read_text())
-            self.assertEqual(record["pid"], 4242)
-            self.assertEqual(record["resume_count"], 1)
-            self.assertEqual(record["run_dir"], str(run_dir.resolve()))
-            self.assertEqual(stdout_path.read_text(), "")
-            self.assertIn('"status": "FAILED"', stderr_path.read_text())
-            self.assertTrue(Path(record["stdout_path"]).name.endswith(".resume1.stdout"))
-            self.assertTrue(Path(record["stderr_path"]).name.endswith(".resume1.stderr"))
-            self.assertEqual(Path(record["stdout_path"]).read_text(), "")
-            self.assertEqual(Path(record["stderr_path"]).read_text(), "")
-            argv = popen.call_args.args[0]
-            self.assertIn("resume", argv)
-            self.assertIn("--foreground", argv)
-            self.assertIn("--run-dir", argv)
-            self.assertIn(str(run_dir.resolve()), argv)
-
-
-    def test_resume_rejects_running_job(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg = {"paths": {"run_root": str(td / "runs")}}
-            jobs = CLI._jobs_dir(cfg)
-            run_dir = td / "runs" / "failed-run"
-            run_dir.mkdir(parents=True)
-            job_id = "beadfeed"
-            stdout_path = jobs / f"{job_id}.resume1.stdout"
-            stderr_path = jobs / f"{job_id}.resume1.stderr"
-            stdout_path.write_text("")
-            stderr_path.write_text("")
-            CLI.atomic_json(jobs / f"{job_id}.json", {
-                "job_id": job_id,
-                "pid": os.getpid(),
-                "started_at": "2026-09-24T00:00:00+00:00",
-                "invocation": str(td / "invocation.json"),
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-                "run_dir": str(run_dir),
-                "resume_count": 1,
-            })
-            args = SimpleNamespace(job=job_id, config=str(td / "config.toml"))
-            with self.assertRaises(CLI.LoopReviewError) as caught:
-                CLI._start_resume_detached(args, cfg)
-            self.assertEqual(caught.exception.code, "RESUME_NOT_SUPPORTED")
-
-
-    def test_internal_foreground_resume_uses_verified_run_dir(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg = {"paths": {"run_root": str(td / "runs")}}
-            jobs = CLI._jobs_dir(cfg)
-            run_dir = td / "runs" / "failed-run"
-            run_dir.mkdir(parents=True)
-            job_id = "faceb00c"
-            stdout_path = jobs / f"{job_id}.resume1.stdout"
-            stderr_path = jobs / f"{job_id}.resume1.stderr"
-            stdout_path.write_text("")
-            stderr_path.write_text("")
-            CLI.atomic_json(jobs / f"{job_id}.json", {
-                "job_id": job_id,
-                "pid": os.getpid(),
-                "started_at": "2026-09-24T00:00:00+00:00",
-                "invocation": str(td / "invocation.json"),
-                "stdout_path": str(stdout_path),
-                "stderr_path": str(stderr_path),
-                "run_dir": str(run_dir),
-                "resume_count": 1,
-            })
-            controller = Mock()
-            controller.resume.return_value = {
-                "status": "FROZEN_PASS",
-                "run_dir": str(run_dir),
-            }
-            argv = [
-                str(CLI_PATH),
-                "--config",
-                str(td / "config.toml"),
-                "resume",
-                "--job",
-                job_id,
-                "--foreground",
-                "--run-dir",
-                str(run_dir),
-            ]
-            with patch.object(CLI, "load_config", return_value=cfg), \
-                 patch.object(CLI, "LoopReviewController", return_value=controller), \
-                 patch.object(sys, "argv", argv), \
-                 patch("builtins.print"):
-                rc = CLI.main()
-
-            self.assertEqual(rc, 0)
-            controller.resume.assert_called_once_with(run_dir.resolve())
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_legacy_results_remain_inspectable(self):
+        directory = self.run_root / '20260923__old-repo__design__abcdef'
+        (directory / 'final').mkdir(parents=True)
+        (directory / 'final' / 'status.json').write_text(json.dumps({'run_id': 'abcdef', 'status': 'FROZEN_PASS', 'run_dir': str(directory)}))
+        output = json.loads(self.cli('status', '--run', 'abcdef', '--json').stdout)
+        self.assertTrue(output['legacy'])
+        self.assertNotEqual(self.cli('resume', '--run', 'abcdef', check=False).returncode, 0)

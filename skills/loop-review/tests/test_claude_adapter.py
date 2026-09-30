@@ -44,7 +44,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             out = td / "out"
             external = td / "external"
             external.mkdir()
-            with patch("loop_review.adapters.claude.run_cmd", side_effect=fake_run):
+            with patch("loop_review.adapters.claude.stream_review", side_effect=fake_run):
                 adapter.review("prompt", td, td / "run", out, [external])
 
         argv = captured["argv"]
@@ -68,7 +68,7 @@ class ClaudeAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             out = td / "out"
-            with patch("loop_review.adapters.claude.run_cmd", side_effect=error):
+            with patch("loop_review.adapters.claude.stream_review", side_effect=error):
                 with self.assertRaises(LoopReviewError):
                     adapter.review("prompt", td, td / "run", out)
 

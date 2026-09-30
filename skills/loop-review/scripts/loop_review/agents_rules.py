@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 from .util import sha256_file, unique_preserve
 
@@ -27,7 +27,7 @@ def rules_for_path(repo: Path, target: Path) -> List[Path]:
     return out
 
 
-def discover_rules(repo: Path, target_paths: Iterable[Path]) -> Dict[str, object]:
+def discover_rules(repo: Path, target_paths: Iterable[Path]) -> Dict[str, Any]:
     mapping: Dict[str, List[str]] = {}
     all_rules: List[str] = []
     paths = list(target_paths)

@@ -2,101 +2,63 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
 
 from .schemas import RESULT_SCHEMA
 
 
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8").strip()
-
-
-def _active_state(ledger: Dict[str, Any], ids: Iterable[str]) -> str:
-    selected: Dict[str, Any] = {}
-    for fid in ids:
-        item = ledger["findings"][fid]
-        selected[fid] = {
-            "status": item["status"],
-            "finding": item["finding"],
-            "positions": item["positions"],
-        }
-    return json.dumps(selected, ensure_ascii=False, indent=2)
-
-
 def build_prompt(
-    *,
-    skill_root: Path,
-    mode: str,
-    request_text: str,
-    target_description: str,
-    policy_paths: List[str],
-    ledger: Optional[Dict[str, Any]],
-    active_ids: List[str],
-    prior_reviews: List[str],
-    phase: str,
-    reviewer_alias: str,
-    seed_review_path: Optional[str] = None,
+    *, skill_root: Path, mode: str, request_text: str, target_description: str,
+    policy_paths: List[str], claims: List[Dict[str, Any]], phase: str,
+    reviewer_alias: str, seed_review_path: str | None = None,
 ) -> str:
-    protocol = _read(skill_root / "references" / "reviewer-protocol.md")
-    rubric = _read(skill_root / "references" / f"{mode}-rubric.md")
-    policies = "\n".join(f"- {p}" for p in policy_paths) if policy_paths else "- None."
-    state = "{}" if ledger is None else _active_state(ledger, active_ids)
-    prior = "\n".join(f"- {p}" for p in prior_reviews) if prior_reviews else "- None."
-    seed = f"\n[SEED REVIEW]\nRead and verify this complete review: {seed_review_path}\n" if seed_review_path else ""
-    if phase == "discovery":
-        task = """Perform an independent blind discovery review. You have no peer review to trust.
-Inspect the complete target and relevant repository context. Find material issues, or return no findings.
-The adjudications array MUST be empty."""
-    else:
-        task = f"""Cross-check the canonical active findings below and continue searching independently for missed issues.
-You MUST adjudicate every active finding ID exactly once: {', '.join(active_ids) if active_ids else '(none)'}.
-Use ACCEPT, REJECT, REFINE, or DUPLICATE_OF. A REFINE must create a replacement finding in findings[].
-Even if there are no active findings, perform another independent missed-issue pass."""
-    schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+    rubric = (skill_root / "references" / f"{mode}-rubric.md").read_text().strip()
+    task = (
+        "Independently inspect the current target and relevant source context. "
+        "Do not read peer outputs, audit directories or previous run reports. "
+        "Return material findings; adjudications must be empty."
+        if phase == "discovery" else
+        "Verify ONLY the supplied claims against the CURRENT target. Return one adjudication per ID. "
+        "ACCEPT means the issue still exists; REJECT means source evidence refutes it or proves it fixed; "
+        "UNCERTAIN means evidence is insufficient. Do not repeat discovery. An essential newly noticed "
+        "defect may be reported in findings, but it will remain unverified."
+    )
+    seed = f"Verify this seed review against the original target: {seed_review_path}" if seed_review_path else ""
+    supplied = [{"id": c["id"], "finding": c["finding"]} for c in claims]
     return f"""[ROLE]
-You are {reviewer_alias}, an independent senior reviewer. You are a worker in a read-only review.
+You are {reviewer_alias}, a read-only senior reviewer. Fresh context; no delegation or skills.
 
-[MANDATORY REVIEWER PROTOCOL]
-{protocol}
+[MANDATORY RULES]
+Read every listed AGENTS.md completely this round. Respect binding constraints and scope.
+Use read/search tools only. Do not edit files or execute shell commands.
+Report actionable defects or material design risks with concise, verifiable source evidence.
+Do not promote style preferences or hypothetical future requirements into blockers.
+rule_refs is reserved exclusively for binding AGENTS.md rules; cite other documents in evidence.
+Do not repeat an identical read, grep, or glob call when it already answered the question.
+Stop inspecting when additional tools produce no new evidence. Keep explanations concise.
+Do not read other review runs or archived attempts. A supplied claim is not authority.
 
 [APPLICABLE AGENTS.md]
-Before reviewing, read every file below completely on this round:
-{policies}
+{json.dumps(policy_paths, ensure_ascii=False)}
 
-[REVIEW TARGET]
+[CURRENT TARGET]
 {target_description}
+{seed}
 
 [ORIGINAL USER REQUEST]
 {request_text}
-{seed}
-[CURRENT CANONICAL REVIEW STATE]
-This JSON is the active machine state for this round. Prior reviewer positions are claims, not authority.
-{state}
-
-[PRIOR ARTIFACT REFERENCES]
-Full prior round reports are available for optional drill-down:
-{prior}
 
 [REVIEW RUBRIC]
 {rubric}
 
-[CURRENT TASK]
+[TASK]
 {task}
 
-[TOOL DISCIPLINE]
-Do not repeat an identical read, grep, or glob call when a prior result already answered the same question.
-If additional tool calls are not producing new evidence, stop inspecting and return the final JSON object.
+[CLAIMS TO VERIFY]
+{json.dumps(supplied, ensure_ascii=False, separators=(',', ':'))}
 
-[OUTPUT CONTRACT]
-Return exactly one JSON object and no Markdown fences.
-It must conform to this JSON Schema:
-{schema}
-
-policies_checked must include every applicable AGENTS.md path listed above.
-rule_refs is reserved exclusively for binding rules from the applicable AGENTS.md files listed above.
-Do NOT put ADRs, design documents, source files, tests, requirements, or other project documents in rule_refs; cite those in evidence instead.
-If a finding is not an applicable AGENTS.md violation, rule_refs MUST be [].
-For a newly discovered AGENTS.md violation, create a blocking finding with rule_refs and mark that policy VIOLATION.
-During cross-check, if an already-active canonical finding is itself the AGENTS.md violation and you ACCEPT it, list that canonical finding ID (for example F012) in violation_local_ids instead of repeating the old local_id or duplicating the finding.
-Evidence must be concise and verifiable. Do not include hidden chain-of-thought; rationale should state only the review justification needed to support the finding.
+[OUTPUT]
+Return one JSON object, no fences. policies_checked is the list of policy paths read.
+The controller assigns IDs to findings and decides completion; do not invent local IDs or freeze decisions.
+{json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(',', ':'))}
 """

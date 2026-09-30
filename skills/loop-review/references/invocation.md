@@ -1,56 +1,38 @@
-# Invocation contract
+# Invocation
 
-Use JSON. The outer agent preserves user text verbatim.
-
-## Design
+Preserve request/target text verbatim. Paths resolve to absolute local paths. Every
+mode requires a Git repository. The run root must be outside reviewed repositories.
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "mode": "design",
-  "repo": "/absolute/repo",
-  "request": {"kind": "text", "content": "user request verbatim"},
-  "target": {"kind": "file", "path": "/absolute/repo/docs/design.md"}
+  "repo": "/absolute/repository",
+  "task": {"id": "issue-91", "title": "运行时迁移"},
+  "title": "修改方案复核",
+  "scope": "full",
+  "request": {"kind": "text", "content": "Original user request verbatim"},
+  "target": {"kind": "file", "path": "/absolute/repository/docs/proposal.md"}
 }
 ```
 
-`target.kind` may be `text` with a `content` field.
+`task` and `title` are optional for older callers, but outer agents should provide
+readable titles. An omitted task ID creates a new task; titles never imply linkage.
+An explicit previous run inherits its task when `task` is omitted. Same Git common
+directory means the same repository (including worktrees); separate clones differ.
 
-## Code: working tree
+Targets:
 
-```json
-{
-  "schema_version": "1.0",
-  "mode": "code",
-  "repo": "/absolute/repo",
-  "request": {"kind": "text", "content": "review current changes"},
-  "target": {"kind": "working-tree"}
-}
-```
+- `design`: `file` or `text` with `content`.
+- `code`: `working-tree`, or `git-range` with `base` and optional `head` (default HEAD).
+- `review`: target plus `seed_review` (`file` or `text`). Seed claims are part of the
+  requested input and are independently verified against the target.
 
-## Code: Git range
+For a changed version, create a new run. Set `previous_run_id` to explicitly link
+unresolved claims from a terminal v2 run of the same repository/task. History is
+copied once and fingerprinted; it is not supplied to full-review discovery.
+`scope: "fixes"` skips discovery and requires at least one historical claim. Without
+explicit history, related task folders remain independent.
 
-```json
-{
-  "schema_version": "1.0",
-  "mode": "code",
-  "repo": "/absolute/repo",
-  "request": {"kind": "text", "content": "review this branch"},
-  "target": {"kind": "git-range", "base": "main", "head": "HEAD"}
-}
-```
-
-## Existing review
-
-```json
-{
-  "schema_version": "1.0",
-  "mode": "review",
-  "repo": "/absolute/repo",
-  "request": {"kind": "text", "content": "verify this review"},
-  "target": {"kind": "file", "path": "/absolute/repo/docs/design.md"},
-  "seed_review": {"kind": "file", "path": "/absolute/review.md"}
-}
-```
-
-All file paths must be absolute after `~` expansion. The controller hashes file inputs and Git state.
+`schema_version: "1.0"` invocations remain accepted with v2 execution defaults;
+old configuration loop fields do not restore the old iterative workflow.

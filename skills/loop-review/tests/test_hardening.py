@@ -1,415 +1,86 @@
 import json
+import shutil
 import subprocess
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from loop_review.config import load_config
+from support import ReviewCase, FakeReviewer
 from loop_review.controller import LoopReviewController
-from loop_review.schemas import validate_result
 from loop_review.util import LoopReviewError
 
 
-class HardeningTests(unittest.TestCase):
-    def test_bare_executable_names_remain_path_resolvable(self):
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "config.toml"
-            p.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "pi"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "claude"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            cfg = load_config(p)
-            self.assertEqual(cfg["reviewers"]["qwen"]["executable"], "pi")
-            self.assertEqual(cfg["reviewers"]["deepseek"]["executable"], "claude")
+class HardeningTests(ReviewCase):
+    def test_worktrees_share_repository_and_task_but_clones_do_not(self):
+        first = self.controller.run(self.invocation(), dry_run=True)
+        worktree = self.base / 'worktree'
+        self.git('worktree', 'add', '-qb', 'feature', str(worktree))
+        second = self.controller.run(self.invocation(repo=str(worktree), target={'kind': 'file', 'path': str(worktree / 'design.md')}), dry_run=True)
+        self.assertEqual(first['repo_id'], second['repo_id'])
+        self.assertEqual(Path(first['run_dir']).parent, Path(second['run_dir']).parent)
+        clone = self.base / 'clones' / 'DeskHands-next'
+        clone.parent.mkdir()
+        subprocess.run(['git', 'clone', '-q', str(self.repo), str(clone)], check=True)
+        third = self.controller.run(self.invocation(repo=str(clone), target={'kind': 'file', 'path': str(clone / 'design.md')}), dry_run=True)
+        self.assertNotEqual(first['repo_id'], third['repo_id'])
+        self.assertNotEqual(Path(first['run_dir']).parents[1], Path(third['run_dir']).parents[1])
 
-    def test_config_rejects_adapter_mismatch(self):
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "config.toml"
-            p.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "/tmp/loop-review-tests"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "opencode"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            with self.assertRaises(LoopReviewError):
-                load_config(p)
+    def test_same_title_without_explicit_task_creates_separate_tasks(self):
+        first = self.controller.run(self.invocation(task={}), dry_run=True)
+        second = self.controller.run(self.invocation(task={}), dry_run=True)
+        self.assertNotEqual(first['task_id'], second['task_id'])
+        self.assertNotEqual(Path(first['run_dir']).parent, Path(second['run_dir']).parent)
 
-    def test_rejects_non_active_adjudication(self):
-        obj = {
-            "schema_version": "1.0",
-            "summary": "x",
-            "policies_checked": [],
-            "adjudications": [{
-                "finding_id": "F999",
-                "decision": "REJECT",
-                "rationale": "x",
-                "evidence": [],
-                "replacement_local_id": None,
-                "duplicate_of": None,
-            }],
-            "findings": [],
-            "open_questions": [],
-            "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
-        }
+    def test_completed_run_is_not_overwritten_by_resume(self):
+        state = self.controller.run(self.invocation())
+        directory = Path(state['run_dir'])
+        original = (directory / 'status.json').read_bytes()
         with self.assertRaises(LoopReviewError):
-            validate_result(obj, [], ["F001"])
+            self.controller.resume(directory)
+        self.assertEqual((directory / 'status.json').read_bytes(), original)
 
-    def test_non_violation_finding_must_not_use_rule_refs(self):
-        policy = "/repo/AGENTS.md"
-        obj = {
-            "schema_version": "1.0",
-            "summary": "x",
-            "policies_checked": [{"path": policy, "status": "CHECKED", "violation_local_ids": []}],
-            "adjudications": [],
-            "findings": [{
-                "local_id": "L1",
-                "severity": "LOW",
-                "blocking": False,
-                "category": "validation",
-                "title": "Tighten validation wording",
-                "claim": "x",
-                "evidence": [],
-                "rule_refs": [{"path": policy, "description": "validation should be stated"}],
-                "rationale": "x",
-                "required_change": "x",
-            }],
-            "open_questions": [],
-            "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
-        }
-        with self.assertRaises(LoopReviewError):
-            validate_result(obj, [policy])
+    def test_request_tampering_cannot_reuse_checkpoints(self):
+        self.a.defect = True
+        self.b.fail = True
+        directory = self.failed_run()
+        (directory / 'input' / 'request.md').write_text('Changed request')
+        with self.assertRaises(LoopReviewError) as caught:
+            self.controller.resume(directory)
+        self.assertEqual(caught.exception.code, 'RESUME_CHECKPOINT_INVALID')
+        self.assertIn('Leaked resource', (directory / 'report.md').read_text())
 
-    def test_policy_violation_must_link_to_blocking_finding(self):
-        policy = "/repo/AGENTS.md"
-        obj = {
-            "schema_version": "1.0",
-            "summary": "x",
-            "policies_checked": [{
-                "path": policy,
-                "status": "VIOLATION",
-                "violation_local_ids": ["L1"],
-            }],
-            "adjudications": [],
-            "findings": [{
-                "local_id": "L1",
-                "severity": "HIGH",
-                "blocking": True,
-                "category": "policy",
-                "title": "Rule violation",
-                "claim": "x",
-                "evidence": [],
-                "rule_refs": [{"path": policy, "description": "keep simple"}],
-                "rationale": "x",
-                "required_change": "x",
-            }],
-            "open_questions": [],
-            "freeze_assessment": {"can_freeze": False, "blocking_local_ids": ["L1"]},
-        }
-        validate_result(obj, [policy])
-        obj["findings"][0]["rule_refs"][0]["path"] = "/other/AGENTS.md"
-        with self.assertRaises(LoopReviewError):
-            validate_result(obj, [policy])
+    def test_raw_success_can_be_recovered_without_another_model_attempt(self):
+        self.a.defect = True
+        self.b.fail = True
+        directory = self.failed_run()
+        checkpoint = directory / 'audit' / 'discovery' / 'reviewer-a' / 'checkpoint.json'
+        saved = json.loads(checkpoint.read_text())
+        (checkpoint.parent / saved['attempt'] / 'result.json').unlink()
+        checkpoint.unlink()
+        self.b.fail = False
+        self.controller.resume(directory)
+        self.assertEqual(len(self.a.prompts), 1)
 
-    def test_external_target_parent_is_added_to_read_dirs(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo = td / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-            (repo / "README.md").write_text("x\n")
-            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    def test_changed_prompt_invalidates_previous_call_checkpoint(self):
+        skill = self.base / 'skill'
+        shutil.copytree(self.controller.skill_root / 'references', skill / 'references')
+        self.controller = LoopReviewController(self.cfg, skill)
+        self.controller.reviewers = {'reviewer-a': self.a, 'reviewer-b': self.b}
+        self.b.fail = True
+        directory = self.failed_run()
+        rubric = skill / 'references' / 'design-rubric.md'
+        rubric.write_text(rubric.read_text() + '\nNew evidence requirement.')
+        self.b.fail = False
+        self.controller.resume(directory)
+        self.assertEqual(len(self.a.prompts), 2)
 
-            external = td / "external"
-            external.mkdir()
-            target = external / "design.md"
-            target.write_text("# Design\n")
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            run_id, run_dir = controller._new_run_dir(repo, "design")
-            inv = {
-                "schema_version": "1.0",
-                "mode": "design",
-                "repo": str(repo),
-                "request": {"kind": "text", "content": "review"},
-                "target": {"kind": "file", "path": str(target)},
-            }
-            prepared = controller._prepare(inv, run_dir, repo)
-            self.assertEqual(prepared["read_dirs"], [external.resolve()])
+    def test_run_root_inside_repository_is_rejected(self):
+        self.cfg['paths']['run_root'] = str(self.repo / 'reviews')
+        controller = LoopReviewController(self.cfg, self.controller.skill_root)
+        with self.assertRaises(LoopReviewError) as caught:
+            controller.run(self.invocation(), dry_run=True)
+        self.assertEqual(caught.exception.code, 'CONFIG_ERROR')
 
-    def test_run_root_inside_repo_is_rejected(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo = td / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(repo / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            with self.assertRaises(LoopReviewError):
-                controller._new_run_dir(repo, "design")
-
-    def test_unexpected_error_persists_failure_audit_and_run_dir(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            repo = td / "repo"
-            repo.mkdir()
-            subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-            (repo / "README.md").write_text("x\n")
-            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "xhigh"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            controller._prepare = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
-            invocation = {
-                "schema_version": "1.0",
-                "mode": "design",
-                "repo": str(repo),
-                "request": {"kind": "text", "content": "review"},
-                "target": {"kind": "text", "content": "# Design"},
-            }
-            inv = td / "invocation.json"
-            inv.write_text(json.dumps(invocation))
-            with self.assertRaises(LoopReviewError) as caught:
-                controller.run(inv)
-            self.assertEqual(caught.exception.code, "UNEXPECTED_ERROR")
-            run_dir = Path(caught.exception.details["run_dir"])
-            status = json.loads((run_dir / "final" / "status.json").read_text())
-            self.assertEqual(status["failure_code"], "UNEXPECTED_ERROR")
-
-    def test_resume_allows_known_reviewer_a_harness_migration(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            manifest = {
-                "reviewers": {
-                    "reviewer-a": {
-                        "adapter": "opencode",
-                        "model": "openrouter/qwen/qwen3.8-flash",
-                        "reasoning": "high",
-                    },
-                    "reviewer-b": {
-                        "adapter": "claude",
-                        "model": "deepseek-flash[1m]",
-                        "reasoning": "max",
-                    },
-                }
-            }
-            migrations = controller._verify_resume_config(manifest)
-            self.assertEqual(migrations, [{
-                "reviewer": "reviewer-a",
-                "from_adapter": "opencode",
-                "to_adapter": "pi",
-                "from_model": "openrouter/qwen/qwen3.8-flash",
-                "to_model": "qwen/qwen3.8-flash",
-            }])
-
-    def test_resume_allows_known_glm_to_qwen_model_migration(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            manifest = {
-                "reviewers": {
-                    "reviewer-a": {
-                        "adapter": "pi",
-                        "model": "z-ai/glm-5.3-flash",
-                        "reasoning": "high",
-                    },
-                    "reviewer-b": {
-                        "adapter": "claude",
-                        "model": "deepseek-flash[1m]",
-                        "reasoning": "max",
-                    },
-                }
-            }
-            migrations = controller._verify_resume_config(manifest)
-            self.assertEqual(migrations, [{
-                "reviewer": "reviewer-a",
-                "from_adapter": "pi",
-                "to_adapter": "pi",
-                "from_model": "z-ai/glm-5.3-flash",
-                "to_model": "qwen/qwen3.8-flash",
-            }])
-
-    def test_resume_reads_legacy_reviewer_a_artifact_paths(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "x"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            run_dir = td / "run"
-            legacy_grok = run_dir / "rounds" / "00-discovery" / "grok"
-            legacy_grok.mkdir(parents=True)
-            legacy_glm = run_dir / "rounds" / "00-discovery" / "glm"
-            legacy_glm.mkdir(parents=True)
-            preflight = run_dir / "preflight"
-            preflight.mkdir(parents=True)
-            (preflight / "grok.json").write_text("{}")
-            (preflight / "glm.json").write_text("{}")
-
-            self.assertEqual(
-                controller._existing_round_dir(run_dir, "00-discovery", "qwen"),
-                legacy_glm,
-            )
-            self.assertTrue(controller._preflight_checkpoint_exists(run_dir, "qwen"))
-
-            canonical = run_dir / "rounds" / "00-discovery" / "qwen"
-            canonical.mkdir()
-            self.assertEqual(
-                controller._existing_round_dir(run_dir, "00-discovery", "qwen"),
-                canonical,
-            )
-
-
-    def test_checkpoint_recovers_current_model_result_from_archived_attempt(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            out_dir = td / "rounds" / "00-discovery" / "qwen"
-            out_dir.mkdir(parents=True)
-            result = {
-                "schema_version": "1.0",
-                "summary": "ok",
-                "policies_checked": [],
-                "adjudications": [],
-                "findings": [],
-                "open_questions": [],
-                "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
-            }
-            (out_dir / "result.json").write_text(json.dumps(result))
-            (out_dir / "meta.json").write_text(json.dumps({
-                "status": "OK",
-                "exit_code": 0,
-                "model": "z-ai/glm-5.3-flash",
-            }))
-            attempt = out_dir / "attempts" / "20260930-191504-482432"
-            attempt.mkdir(parents=True)
-            (attempt / "result.json").write_text(json.dumps(result))
-            (attempt / "meta.json").write_text(json.dumps({
-                "status": "OK",
-                "exit_code": 0,
-                "model": "qwen/qwen3.8-flash",
-            }))
-            (attempt / "review.md").write_text("current qwen result\n")
-
-            checkpoint = controller._checkpoint_result(
-                name="qwen",
-                out_dir=out_dir,
-                prepared={"policy_paths": []},
-                active=[],
-                phase="discovery",
-                required_model="qwen/qwen3.8-flash",
-            )
-
-            self.assertIsNotNone(checkpoint)
-            self.assertEqual(checkpoint["source"], "reused_attempt")
-            restored_meta = json.loads((out_dir / "meta.json").read_text())
-            self.assertEqual(restored_meta["model"], "qwen/qwen3.8-flash")
-            self.assertEqual((out_dir / "review.md").read_text(), "current qwen result\n")
-
-    def test_checkpoint_does_not_reuse_old_model_after_migration(self):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            cfg_path = td / "config.toml"
-            cfg_path.write_text(
-                'version = 1\n'
-                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
-                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
-                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
-                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
-            )
-            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
-            out_dir = td / "rounds" / "00-discovery" / "qwen"
-            out_dir.mkdir(parents=True)
-            result = {
-                "schema_version": "1.0",
-                "summary": "ok",
-                "policies_checked": [],
-                "adjudications": [],
-                "findings": [],
-                "open_questions": [],
-                "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
-            }
-            (out_dir / "result.json").write_text(json.dumps(result))
-            (out_dir / "meta.json").write_text(json.dumps({
-                "status": "OK",
-                "exit_code": 0,
-                "model": "z-ai/glm-5.3-flash",
-            }))
-
-            checkpoint = controller._checkpoint_result(
-                name="qwen",
-                out_dir=out_dir,
-                prepared={"policy_paths": []},
-                active=[],
-                phase="discovery",
-                required_model="qwen/qwen3.8-flash",
-            )
-
-            self.assertIsNone(checkpoint)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_prompt_limit_fails_before_model_call(self):
+        self.controller.config['limits']['max_prompt_bytes'] = 10
+        directory = self.failed_run()
+        self.assertEqual(len(self.a.prompts) + len(self.b.prompts), 0)
+        self.assertEqual(json.loads((directory / 'status.json').read_text())['failure_code'], 'PROMPT_LIMIT_EXCEEDED')

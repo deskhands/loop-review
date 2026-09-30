@@ -1,13 +1,20 @@
-version = 1
+version = 2
 
 [paths]
 run_root = "~/code/agents-tmp/loop-review"
 
-[loop]
-max_cycles = 2
-max_model_calls = 6
+[limits]
+max_task_attempts = 6
+max_turns = 32
+max_tool_calls = 48
+max_identical_tool_calls = 3
+max_provider_retries = 2
+max_total_tokens = 2000000
+max_run_seconds = 1800
+max_prompt_bytes = 65536
+max_output_bytes = 52428800
 
-# Pi reviewer for OpenRouter/Qwen. Configure Pi/OpenRouter auth separately.
+# Existing model choices; model/provider evaluation is phase two.
 [reviewers.qwen]
 adapter = "pi"
 executable = "pi"
@@ -15,7 +22,6 @@ model = "qwen/qwen3.8-flash"
 reasoning = "high"
 timeout_seconds = 1800
 
-# Provider-isolated Claude Code launcher for DeepSeek official.
 [reviewers.deepseek]
 adapter = "claude"
 executable = "claude-deepseek"

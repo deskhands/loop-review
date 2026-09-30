@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class ReviewerAdapter:
     def __init__(self, name: str, config: Dict[str, Any]):
         self.name = name
         self.config = config
+        self.limits: Dict[str, int] = {}
+        self.progress: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.cancel: Optional[Callable[[], None]] = None
 
     def version(self) -> str:
         raise NotImplementedError

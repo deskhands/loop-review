@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import ReviewerAdapter
+from ..execution import stream_review
 from ..util import LoopReviewError, atomic_json, run_cmd, write_text
 
 
@@ -158,6 +159,8 @@ class PiAdapter(ReviewerAdapter):
                 "Pi response did not contain a final assistant text result",
                 {"stats": stats},
             )
+        if stats["last_assistant_stop_reason"] not in (None, "stop", "end_turn"):
+            raise LoopReviewError("MODEL_CALL_FAILED", "Pi did not finish with a normal terminal response", {"stats": stats})
 
         try:
             result = json.loads(final_text)
@@ -237,17 +240,20 @@ class PiAdapter(ReviewerAdapter):
         started = time.time()
 
         try:
-            cp = run_cmd(argv, cwd=cwd, timeout=timeout_seconds)
+            cp = stream_review(argv, cwd=cwd, out_dir=out_dir, timeout=timeout_seconds,
+                               limits=self.limits, progress=self.progress, cancel=self.cancel)
         except LoopReviewError as e:
             duration_ms = int((time.time() - started) * 1000)
-            if e.code == "TIMEOUT":
+            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
                 stdout = str(e.details.get("stdout", ""))
                 stderr = str(e.details.get("stderr", ""))
                 _, stats = self._events(stdout)
-                write_text(out_dir / "raw.stdout", stdout)
-                write_text(out_dir / "raw.stderr", stderr)
+                if not (out_dir / "raw.stdout").exists():
+                    write_text(out_dir / "raw.stdout", stdout)
+                if not (out_dir / "raw.stderr").exists():
+                    write_text(out_dir / "raw.stderr", stderr)
                 meta = {
-                    "status": "TIMEOUT",
+                    "status": e.code,
                     "duration_ms": duration_ms,
                     "exit_code": None,
                     "provider": "openrouter",
@@ -266,7 +272,7 @@ class PiAdapter(ReviewerAdapter):
                     },
                 )
                 raise LoopReviewError(
-                    "TIMEOUT",
+                    e.code,
                     e.message,
                     {
                         "timeout_seconds": timeout_seconds,
@@ -284,8 +290,10 @@ class PiAdapter(ReviewerAdapter):
             raise
 
         duration_ms = int((time.time() - started) * 1000)
-        write_text(out_dir / "raw.stdout", cp.stdout)
-        write_text(out_dir / "raw.stderr", cp.stderr)
+        if not (out_dir / "raw.stdout").exists():
+            write_text(out_dir / "raw.stdout", cp.stdout)
+        if not (out_dir / "raw.stderr").exists():
+            write_text(out_dir / "raw.stderr", cp.stderr)
 
         final_text, stats = self._events(cp.stdout)
         meta = {
