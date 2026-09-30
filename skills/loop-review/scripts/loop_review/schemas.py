@@ -208,13 +208,16 @@ def validate_result(
             if rule_path not in expected:
                 raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Finding {lid} references non-applicable AGENTS.md: {rule_path}")
     findings_by_id = {f["local_id"]: f for f in findings}
+    active = set(active_finding_ids or [])
     for path, policy in policy_by_path.items():
         listed = set(policy["violation_local_ids"])
         if policy["status"] == "VIOLATION":
             for lid in listed:
                 finding = findings_by_id.get(lid)
                 if finding is None:
-                    raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Policy {path} references unknown finding {lid}")
+                    if lid not in active:
+                        raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Policy {path} references unknown finding {lid}")
+                    continue
                 if not finding["blocking"]:
                     raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"Policy violation finding {lid} must be blocking")
                 if path not in {ref["path"] for ref in finding["rule_refs"]}:
@@ -229,8 +232,8 @@ def validate_result(
                     )
                 if not finding["blocking"]:
                     raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"AGENTS.md violation finding {lid} must be blocking")
-    active = set(active_finding_ids or [])
     seen_adj: Set[str] = set()
+    adjudication_by_id: Dict[str, Dict[str, Any]] = {}
     for i, a in enumerate(adjudications):
         if not isinstance(a, dict):
             raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"adjudications[{i}] must be object")
@@ -255,6 +258,19 @@ def validate_result(
         if decision == "DUPLICATE_OF" and not dup:
             raise LoopReviewError("SCHEMA_VALIDATION_FAILED", f"DUPLICATE_OF {fid} needs duplicate_of")
         seen_adj.add(fid)
+        adjudication_by_id[fid] = a
+
+    for path, policy in policy_by_path.items():
+        if policy["status"] != "VIOLATION":
+            continue
+        for fid in policy["violation_local_ids"]:
+            if fid in active:
+                decision = adjudication_by_id.get(fid, {}).get("decision")
+                if decision != "ACCEPT":
+                    raise LoopReviewError(
+                        "SCHEMA_VALIDATION_FAILED",
+                        f"Policy {path} references active finding {fid} but its adjudication is {decision or 'missing'}, not ACCEPT",
+                    )
 
     if active_finding_ids is not None and seen_adj != active:
         missing_adj = active - seen_adj

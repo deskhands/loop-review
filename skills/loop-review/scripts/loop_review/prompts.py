@@ -96,6 +96,7 @@ policies_checked must include every applicable AGENTS.md path listed above.
 rule_refs is reserved exclusively for binding rules from the applicable AGENTS.md files listed above.
 Do NOT put ADRs, design documents, source files, tests, requirements, or other project documents in rule_refs; cite those in evidence instead.
 If a finding is not an applicable AGENTS.md violation, rule_refs MUST be [].
-For an AGENTS.md violation, create a blocking finding with rule_refs and mark that policy VIOLATION.
+For a newly discovered AGENTS.md violation, create a blocking finding with rule_refs and mark that policy VIOLATION.
+During cross-check, if an already-active canonical finding is itself the AGENTS.md violation and you ACCEPT it, list that canonical finding ID (for example F012) in violation_local_ids instead of repeating the old local_id or duplicating the finding.
 Evidence must be concise and verifiable. Do not include hidden chain-of-thought; rationale should state only the review justification needed to support the finding.
 """

@@ -32,6 +32,41 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(LoopReviewError):
             validate_result(base_result(), ["/r/AGENTS.md"], ["F001"])
 
+    def test_crosscheck_policy_can_reference_accepted_active_finding(self):
+        result = base_result()
+        result["policies_checked"] = [{
+            "path": "/r/AGENTS.md",
+            "status": "VIOLATION",
+            "violation_local_ids": ["F001"],
+        }]
+        result["adjudications"] = [{
+            "finding_id": "F001",
+            "decision": "ACCEPT",
+            "rationale": "still violates policy",
+            "evidence": [],
+            "replacement_local_id": None,
+            "duplicate_of": None,
+        }]
+        validate_result(result, ["/r/AGENTS.md"], ["F001"])
+
+    def test_crosscheck_policy_rejects_rejected_active_finding(self):
+        result = base_result()
+        result["policies_checked"] = [{
+            "path": "/r/AGENTS.md",
+            "status": "VIOLATION",
+            "violation_local_ids": ["F001"],
+        }]
+        result["adjudications"] = [{
+            "finding_id": "F001",
+            "decision": "REJECT",
+            "rationale": "not a violation",
+            "evidence": [],
+            "replacement_local_id": None,
+            "duplicate_of": None,
+        }]
+        with self.assertRaises(LoopReviewError):
+            validate_result(result, ["/r/AGENTS.md"], ["F001"])
+
 
 if __name__ == "__main__":
     unittest.main()
