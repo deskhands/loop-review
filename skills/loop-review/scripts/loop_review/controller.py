@@ -629,12 +629,50 @@ class LoopReviewController:
         prepared: Dict[str, Any],
         active: List[str],
         phase: str,
+        required_model: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        result_path = out_dir / "result.json"
-        if result_path.is_file():
+        def model_matches(meta: Dict[str, Any]) -> bool:
+            if required_model is None:
+                return True
+            actual = str(meta.get("model", "")).removeprefix("openrouter/")
+            expected = str(required_model).removeprefix("openrouter/")
+            return bool(actual) and actual == expected
+
+        def load_checkpoint(candidate_dir: Path) -> Optional[Dict[str, Any]]:
+            result_path = candidate_dir / "result.json"
+            if result_path.is_file():
+                try:
+                    result = validate_result(
+                        load_json(result_path),
+                        prepared["policy_paths"],
+                        active if phase != "discovery" else None,
+                    )
+                    if phase == "discovery" and result["adjudications"]:
+                        raise LoopReviewError(
+                            "SCHEMA_VALIDATION_FAILED",
+                            "Discovery result must not adjudicate findings",
+                        )
+                    meta_path = candidate_dir / "meta.json"
+                    meta = load_json(meta_path) if meta_path.is_file() else {}
+                    if not model_matches(meta):
+                        return None
+                    return {"result": result, "meta": meta, "source": "reused"}
+                except LoopReviewError:
+                    pass
+
+            raw_path = candidate_dir / "raw.stdout"
+            meta_path = candidate_dir / "meta.json"
+            if not raw_path.is_file() or not meta_path.is_file():
+                return None
+            meta = load_json(meta_path)
+            if meta.get("exit_code") != 0 or not model_matches(meta):
+                return None
             try:
+                parsed = self.reviewers[name].parse_saved_output(
+                    raw_path.read_text(encoding="utf-8")
+                )
                 result = validate_result(
-                    load_json(result_path),
+                    parsed,
                     prepared["policy_paths"],
                     active if phase != "discovery" else None,
                 )
@@ -643,51 +681,60 @@ class LoopReviewController:
                         "SCHEMA_VALIDATION_FAILED",
                         "Discovery result must not adjudicate findings",
                     )
-                meta_path = out_dir / "meta.json"
-                meta = load_json(meta_path) if meta_path.is_file() else {}
-                return {"result": result, "meta": meta, "source": "reused"}
             except LoopReviewError:
-                pass
+                return None
 
-        raw_path = out_dir / "raw.stdout"
-        meta_path = out_dir / "meta.json"
-        if not raw_path.is_file() or not meta_path.is_file():
-            return None
-        meta = load_json(meta_path)
-        if meta.get("exit_code") != 0:
-            return None
-        try:
-            parsed = self.reviewers[name].parse_saved_output(
-                raw_path.read_text(encoding="utf-8")
-            )
-            result = validate_result(
-                parsed,
-                prepared["policy_paths"],
-                active if phase != "discovery" else None,
-            )
-            if phase == "discovery" and result["adjudications"]:
-                raise LoopReviewError(
-                    "SCHEMA_VALIDATION_FAILED",
-                    "Discovery result must not adjudicate findings",
-                )
-        except LoopReviewError:
-            return None
+            atomic_json(result_path, result)
+            recovered_meta = dict(meta)
+            recovered_meta["status"] = "RECOVERED_FROM_RAW"
+            recovered_meta["reviewer_alias"] = self.aliases[name]
+            if phase != "discovery":
+                recovered_meta["active_finding_ids"] = active
+            atomic_json(meta_path, recovered_meta)
+            error_path = candidate_dir / "error.json"
+            if error_path.is_file():
+                shutil.copy2(error_path, candidate_dir / "error.recovered.json")
+                error_path.unlink()
+            invalid_path = candidate_dir / "result.invalid.json"
+            if invalid_path.is_file():
+                invalid_path.unlink()
+            return {"result": result, "meta": recovered_meta, "source": "recovered"}
 
-        atomic_json(result_path, result)
-        recovered_meta = dict(meta)
-        recovered_meta["status"] = "RECOVERED_FROM_RAW"
-        recovered_meta["reviewer_alias"] = self.aliases[name]
-        if phase != "discovery":
-            recovered_meta["active_finding_ids"] = active
-        atomic_json(meta_path, recovered_meta)
-        error_path = out_dir / "error.json"
-        if error_path.is_file():
-            shutil.copy2(error_path, out_dir / "error.recovered.json")
-            error_path.unlink()
-        invalid_path = out_dir / "result.invalid.json"
-        if invalid_path.is_file():
-            invalid_path.unlink()
-        return {"result": result, "meta": recovered_meta, "source": "recovered"}
+        checkpoint = load_checkpoint(out_dir)
+        if checkpoint is not None:
+            return checkpoint
+
+        attempts_dir = out_dir / "attempts"
+        if not attempts_dir.is_dir():
+            return None
+        for attempt_dir in sorted(
+            (p for p in attempts_dir.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+            reverse=True,
+        ):
+            checkpoint = load_checkpoint(attempt_dir)
+            if checkpoint is None:
+                continue
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for artifact_name in (
+                "prompt.md",
+                "raw.stdout",
+                "raw.stderr",
+                "meta.json",
+                "result.json",
+                "review.md",
+            ):
+                source = attempt_dir / artifact_name
+                if source.is_file():
+                    shutil.copy2(source, out_dir / artifact_name)
+            for stale_name in ("error.json", "result.invalid.json"):
+                stale = out_dir / stale_name
+                if stale.is_file():
+                    stale.unlink()
+            if checkpoint["source"] == "reused":
+                checkpoint["source"] = "reused_attempt"
+            return checkpoint
+        return None
 
     def _execute_review(
         self,
@@ -735,13 +782,18 @@ class LoopReviewController:
             checkpoint = None
             checkpoint_dir = self._existing_round_dir(run_dir, "00-discovery", name)
             checkpoint_dirs[name] = checkpoint_dir
-            if reuse_checkpoints and name not in model_migrated_names:
+            if reuse_checkpoints:
                 checkpoint = self._checkpoint_result(
                     name=name,
                     out_dir=checkpoint_dir,
                     prepared=prepared,
                     active=[],
                     phase="discovery",
+                    required_model=(
+                        self.config["reviewers"][name]["model"]
+                        if name in model_migrated_names
+                        else None
+                    ),
                 )
             if checkpoint is None:
                 missing.append(name)
@@ -843,13 +895,18 @@ class LoopReviewController:
                 out_dir = self._round_dir(run_dir, round_name, name)
                 checkpoint_dir = self._existing_round_dir(run_dir, round_name, name)
                 checkpoint = None
-                if reuse_checkpoints and name not in model_migrated_names:
+                if reuse_checkpoints:
                     checkpoint = self._checkpoint_result(
                         name=name,
                         out_dir=checkpoint_dir,
                         prepared=prepared,
                         active=current_active,
                         phase="cross-check",
+                        required_model=(
+                            self.config["reviewers"][name]["model"]
+                            if name in model_migrated_names
+                            else None
+                        ),
                     )
 
                 if checkpoint is None:

@@ -315,6 +315,101 @@ class HardeningTests(unittest.TestCase):
             )
 
 
+    def test_checkpoint_recovers_current_model_result_from_archived_attempt(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg_path = td / "config.toml"
+            cfg_path.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
+            out_dir = td / "rounds" / "00-discovery" / "qwen"
+            out_dir.mkdir(parents=True)
+            result = {
+                "schema_version": "1.0",
+                "summary": "ok",
+                "policies_checked": [],
+                "adjudications": [],
+                "findings": [],
+                "open_questions": [],
+                "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
+            }
+            (out_dir / "result.json").write_text(json.dumps(result))
+            (out_dir / "meta.json").write_text(json.dumps({
+                "status": "OK",
+                "exit_code": 0,
+                "model": "z-ai/glm-5.3-flash",
+            }))
+            attempt = out_dir / "attempts" / "20260930-191504-482432"
+            attempt.mkdir(parents=True)
+            (attempt / "result.json").write_text(json.dumps(result))
+            (attempt / "meta.json").write_text(json.dumps({
+                "status": "OK",
+                "exit_code": 0,
+                "model": "qwen/qwen3.8-flash",
+            }))
+            (attempt / "review.md").write_text("current qwen result\n")
+
+            checkpoint = controller._checkpoint_result(
+                name="qwen",
+                out_dir=out_dir,
+                prepared={"policy_paths": []},
+                active=[],
+                phase="discovery",
+                required_model="qwen/qwen3.8-flash",
+            )
+
+            self.assertIsNotNone(checkpoint)
+            self.assertEqual(checkpoint["source"], "reused_attempt")
+            restored_meta = json.loads((out_dir / "meta.json").read_text())
+            self.assertEqual(restored_meta["model"], "qwen/qwen3.8-flash")
+            self.assertEqual((out_dir / "review.md").read_text(), "current qwen result\n")
+
+    def test_checkpoint_does_not_reuse_old_model_after_migration(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg_path = td / "config.toml"
+            cfg_path.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
+            out_dir = td / "rounds" / "00-discovery" / "qwen"
+            out_dir.mkdir(parents=True)
+            result = {
+                "schema_version": "1.0",
+                "summary": "ok",
+                "policies_checked": [],
+                "adjudications": [],
+                "findings": [],
+                "open_questions": [],
+                "freeze_assessment": {"can_freeze": True, "blocking_local_ids": []},
+            }
+            (out_dir / "result.json").write_text(json.dumps(result))
+            (out_dir / "meta.json").write_text(json.dumps({
+                "status": "OK",
+                "exit_code": 0,
+                "model": "z-ai/glm-5.3-flash",
+            }))
+
+            checkpoint = controller._checkpoint_result(
+                name="qwen",
+                out_dir=out_dir,
+                prepared={"policy_paths": []},
+                active=[],
+                phase="discovery",
+                required_model="qwen/qwen3.8-flash",
+            )
+
+            self.assertIsNone(checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()
