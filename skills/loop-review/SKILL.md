@@ -62,6 +62,12 @@ phase. Empty complete discoveries finish early. New verification findings remain
 unverified; disputes terminate without another debate loop. Partial failures still
 produce a report, and never receive a passing conclusion.
 
+Token budgets reserve verification capacity separately for each reviewer. Live
+status/report shows phase allowances and cache/input/output breakdowns. A finish
+warning asks the reviewer to return partial evidence; coverage questions prevent
+an early result from passing. If a phase hits TASK_BUDGET_EXCEEDED, inspect the
+partial report and narrow the next review's scope instead of silently retrying.
+
 Human-readable `list` and `status` are available without `--json`. Generated root,
 repository and task indexes link the reports. `status.json` is authoritative.
 

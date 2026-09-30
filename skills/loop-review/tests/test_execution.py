@@ -70,6 +70,19 @@ class ExecutionTests(unittest.TestCase):
             self.assertTrue(not state or state.startswith('Z'), state)
             self.assertIn('turn_start', (directory / 'out' / 'raw.stdout').read_text())
 
+    def test_phase_budget_failure_stops_worker_and_preserves_error_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            program = self.program(directory, "import json,time\nprint(json.dumps({'type':'turn_start'}),flush=True)\ntime.sleep(20)\n")
+            def exhausted(stats):
+                raise LoopReviewError('TASK_BUDGET_EXCEEDED', 'Phase allocation exhausted')
+            with self.assertRaises(LoopReviewError) as caught:
+                self.adapter(program, progress=exhausted).review('prompt', directory, directory, directory / 'out')
+            self.assertEqual(caught.exception.code, 'TASK_BUDGET_EXCEEDED')
+            meta = json.loads((directory / 'out' / 'meta.json').read_text())
+            self.assertEqual(meta['status'], 'TASK_BUDGET_EXCEEDED')
+            self.assertFalse((directory / 'out' / 'process.json').exists())
+
     def test_worker_that_closes_pipes_is_still_supervised(self):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)

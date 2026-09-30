@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import ReviewerAdapter
 from ..execution import stream_review
-from ..util import LoopReviewError, atomic_json, run_cmd, write_text
+from ..util import LoopReviewError, atomic_json, load_json, run_cmd, write_text
 
 
 class PiAdapter(ReviewerAdapter):
@@ -244,10 +244,13 @@ class PiAdapter(ReviewerAdapter):
                                limits=self.limits, progress=self.progress, cancel=self.cancel)
         except LoopReviewError as e:
             duration_ms = int((time.time() - started) * 1000)
-            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
+            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "TASK_BUDGET_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
                 stdout = str(e.details.get("stdout", ""))
                 stderr = str(e.details.get("stderr", ""))
                 _, stats = self._events(stdout)
+                stream = out_dir / 'stream.json'
+                if stream.exists():
+                    stats['max_identical_tool_calls'] = load_json(stream)['max_identical_tool_calls']
                 if not (out_dir / "raw.stdout").exists():
                     write_text(out_dir / "raw.stdout", stdout)
                 if not (out_dir / "raw.stderr").exists():
@@ -324,6 +327,10 @@ class PiAdapter(ReviewerAdapter):
         try:
             result, parsed_stats = self._extract(cp.stdout)
             meta.update(parsed_stats)
+            # The stream monitor exempts only the worker's own live budget polls.
+            stream = out_dir / 'stream.json'
+            if stream.exists():
+                meta['max_identical_tool_calls'] = load_json(stream)['max_identical_tool_calls']
         except LoopReviewError as e:
             meta["status"] = "FAILED"
             atomic_json(out_dir / "meta.json", meta)

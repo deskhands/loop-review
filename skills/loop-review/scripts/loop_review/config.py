@@ -33,6 +33,8 @@ def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
         for key, value in cfg["limits"].items():
             if key not in DEFAULT_LIMITS or type(value) is not int or value < 1:
                 raise LoopReviewError("CONFIG_ERROR", f"Invalid limit: {key}")
+        if cfg['limits']['max_total_tokens'] < 8:
+            raise LoopReviewError('CONFIG_ERROR', 'max_total_tokens must allow nonzero reviewer/phase allocations (minimum 8)')
         return cfg
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
         raise LoopReviewError("CONFIG_ERROR", f"Invalid configuration: {error}")

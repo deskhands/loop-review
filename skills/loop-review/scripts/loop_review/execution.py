@@ -16,21 +16,26 @@ from .util import LoopReviewError, atomic_json
 DEFAULT_LIMITS = {
     "max_task_attempts": 6, "max_turns": 32, "max_tool_calls": 48,
     "max_identical_tool_calls": 3, "max_provider_retries": 2,
-    "max_total_tokens": 2_000_000, "max_run_seconds": 1800,
+    "max_total_tokens": 8_000_000, "max_run_seconds": 1800,
     "max_prompt_bytes": 65_536, "max_output_bytes": 52_428_800,
 }
 
 
 class EventMonitor:
-    def __init__(self, limits: Dict[str, int], progress: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def __init__(self, limits: Dict[str, int], progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 budget_path: Optional[Path] = None):
         self.limits = {**DEFAULT_LIMITS, **limits}
         self.progress = progress
+        self.budget_path = str(budget_path) if budget_path else None
         self.calls: Counter[str] = Counter()
         self.messages: set[str] = set()
+        self.message_usage: Dict[str, Dict[str, Any]] = {}
         self.tool_ids: set[str] = set()
         self.stats: Dict[str, Any] = {
             "turns": 0, "tool_calls": 0, "provider_retries": 0,
             "max_identical_tool_calls": 0, "total_tokens": None, "reported_cost": None,
+            "input_tokens": None, "output_tokens": None,
+            "cache_read_tokens": None, "cache_write_tokens": None,
         }
 
     def feed(self, raw: str) -> None:
@@ -55,7 +60,7 @@ class EventMonitor:
             if message_id not in self.messages:
                 self.messages.add(message_id)
                 self.stats["turns"] += 1
-                self._usage(message.get("usage", {}), cumulative=False)
+            self._usage(message.get("usage", {}), cumulative=False, message_id=message_id)
             for item in message.get("content", []):
                 if item.get("type") == "tool_use" and item.get("id") not in self.tool_ids:
                     if item.get("id"):
@@ -76,22 +81,47 @@ class EventMonitor:
             self.progress(dict(self.stats))
 
     def _tool(self, name: Any, args: Any) -> None:
+        self.stats["tool_calls"] += 1
+        # A changing budget file is deliberately polled. All reads still count
+        # against the tool ceiling; only this exact path escapes loop detection.
+        if str(name).lower() == 'read' and isinstance(args, dict) and self.budget_path:
+            path = args.get('path') or args.get('file_path')
+            if path == self.budget_path:
+                return
         key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
         self.calls[key] += 1
-        self.stats["tool_calls"] += 1
         self.stats["max_identical_tool_calls"] = max(self.calls.values())
 
-    def _usage(self, usage: Dict[str, Any], *, cumulative: bool) -> None:
+    def _usage(self, usage: Dict[str, Any], *, cumulative: bool, message_id: Optional[str] = None) -> None:
+        aliases = {"input_tokens": ("input_tokens", "input"), "output_tokens": ("output_tokens", "output"),
+                   "cache_read_tokens": ("cache_read_input_tokens", "cacheRead"),
+                   "cache_write_tokens": ("cache_creation_input_tokens", "cacheWrite")}
+        values = {}
+        for field, keys in aliases.items():
+            for key in keys:
+                value = usage.get(key)
+                if isinstance(value, (int, float)):
+                    values[field] = value
+                    break
         total = usage.get("totalTokens")
-        if total is None:
-            fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-            if any(isinstance(usage.get(key), (int, float)) for key in fields):
-                total = sum(usage.get(key, 0) for key in fields)
         if isinstance(total, (int, float)):
-            self.stats["total_tokens"] = total if cumulative else (self.stats["total_tokens"] or 0) + total
+            values["total_tokens"] = total
+        elif values:
+            previous = self.message_usage.get(message_id, {}) if message_id else {}
+            values["total_tokens"] = sum(max(values.get(field, 0), previous.get(field, 0)) for field in aliases)
         cost = usage.get("cost", {}).get("total")
         if isinstance(cost, (int, float)):
-            self.stats["reported_cost"] = (self.stats["reported_cost"] or 0) + cost
+            values["reported_cost"] = cost
+        # Claude can emit multiple content blocks with the same message ID and
+        # later usage updates. Charge each reported counter only once.
+        previous = self.message_usage.setdefault(message_id, {}) if message_id else {}
+        for field, value in values.items():
+            if cumulative:
+                self.stats[field] = value
+            else:
+                delta = max(0, value - previous.get(field, 0))
+                self.stats[field] = (self.stats[field] or 0) + delta
+                previous[field] = max(value, previous.get(field, 0))
 
 
 def stop_group(proc: subprocess.Popen) -> None:
@@ -122,7 +152,7 @@ def stream_review(
     cancel: Optional[Callable[[], None]] = None,
 ) -> subprocess.CompletedProcess:
     out_dir.mkdir(parents=True, exist_ok=True)
-    monitor = EventMonitor(limits, progress)
+    monitor = EventMonitor(limits, progress, out_dir.parent / 'live-budget.json')
     started = time.monotonic()
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,

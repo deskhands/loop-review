@@ -443,6 +443,8 @@ class LoopReviewController:
             skill_root=self.skill_root, mode=prepared["mode"], request_text=prepared["request_text"],
             target_description=prepared["target_description"], policy_paths=prepared["policy_paths"],
             claims=claims, phase=phase, reviewer_alias=name,
+            budget_path=str(self.run_dir / 'audit' / phase / name / 'live-budget.json'),
+            token_limit=self._token_limit(phase), limits=self.config['limits'],
             seed_review_path=str(prepared["seed_review_path"]) if prepared.get("seed_review_path") else None,
         )
         if len(prompt.encode()) > self.config["limits"]["max_prompt_bytes"]:
@@ -464,9 +466,44 @@ class LoopReviewController:
     def _elapsed(self) -> float:
         return self.prior_elapsed + (time.monotonic() - self.session_started if self.session_started else 0)
 
+    def _token_limit(self, phase: str) -> int:
+        share = self.config['limits']['max_total_tokens'] // len(self.reviewers)
+        if self.state['scope'] == 'fixes':
+            return share if phase == 'verification' else 0
+        discovery = share * 3 // 4
+        return discovery if phase == 'discovery' else share - discovery
+
+    def _budget(self, phase: str, name: str) -> Dict[str, Any]:
+        attempts = [item for key, item in self.state['progress'].items() if key.startswith(f'{phase}/{name}/')]
+        known = [item['total_tokens'] for item in attempts if item.get('total_tokens') is not None]
+        tokens = sum(known)
+        limit = self._token_limit(phase)
+        limits = self.config['limits']
+        finish = (bool(known) and tokens * 4 >= limit * 3) or any(
+            item.get('finish_requested') or item.get('turns', 0) * 4 >= limits['max_turns'] * 3
+            or item.get('tool_calls', 0) * 4 >= limits['max_tool_calls'] * 3 for item in attempts)
+        return {'token_limit': limit, 'known_tokens': tokens if known else None,
+                'usage_unknown': not attempts or len(known) != len(attempts),
+                'remaining_tokens': max(0, limit - tokens), 'action': 'finish' if finish else 'inspect',
+                'max_turns': limits['max_turns'], 'max_tool_calls': limits['max_tool_calls']}
+
+    def _coverage_question(self, result: Dict[str, Any], phase: str, name: str) -> Dict[str, Any]:
+        with self.lock:
+            if self._budget(phase, name)['action'] == 'finish':
+                question = f'{phase}/{name}: resource warning reached; complete scope coverage requires follow-up.'
+                if question not in result['open_questions']:
+                    result['open_questions'].append(question)
+        return result
+
     def _publish(self) -> None:
         self.state["updated_at"] = timestamp()
         self.state["elapsed_seconds"] = round(self._elapsed(), 3)
+        self.state['budgets'] = {}
+        for phase in ('discovery', 'verification'):
+            for name in self.reviewers:
+                budget = self._budget(phase, name)
+                self.state['budgets'][f'{phase}/{name}'] = budget
+                atomic_json(self.run_dir / 'audit' / phase / name / 'live-budget.json', budget)
         self.result["status"] = self.state["status"]
         atomic_json(self.run_dir / "status.json", self.state)
         atomic_json(self.run_dir / "result.json", self.result)
@@ -489,10 +526,23 @@ class LoopReviewController:
     def _progress(self, key: str, stats: Dict[str, Any]) -> None:
         with self.lock:
             self.state["progress"][key].update(stats)
+            phase, name, _ = key.split('/')
+            budget = self._budget(phase, name)
+            if budget['action'] == 'finish':
+                self.state['progress'][key]['finish_requested'] = True
+            atomic_json(self.run_dir / 'audit' / phase / name / 'live-budget.json', budget)
             if time.monotonic() - self.last_publish >= 0.5:
                 self._publish()
                 self.last_publish = time.monotonic()
+            self._check_worker_budget(phase, name)
+
+    def _check_worker_budget(self, phase: str, name: str) -> None:
+        with self.lock:
             self._check_budget()
+            budget = self._budget(phase, name)
+            if (budget['known_tokens'] or 0) >= budget['token_limit']:
+                raise LoopReviewError('TASK_BUDGET_EXCEEDED',
+                                      f'{phase}/{name} exhausted its cumulative token allocation')
 
     def _checkpoint(
         self, slot: Path, digest: str, prepared: Dict[str, Any], ids: List[str], name: str,
@@ -519,6 +569,7 @@ class LoopReviewController:
                 result = validate_result(self.reviewers[name].parse_saved_output(raw), prepared["policy_paths"], ids)
             except (LoopReviewError, OSError):
                 continue
+            result = self._coverage_question(result, slot.parent.name, name)
             atomic_json(attempt / "result.json", result)
             atomic_json(checkpoint, {"digest": digest, "attempt": attempt.name,
                                      "result_sha256": sha256_file(attempt / "result.json")})
@@ -539,7 +590,7 @@ class LoopReviewController:
         if cached is not None:
             return cached
         with self.lock:
-            self._check_budget()
+            self._check_worker_budget(phase, name)
             if self.state["review_calls"] >= self.config["limits"]["max_task_attempts"]:
                 raise LoopReviewError("RUN_BUDGET_EXCEEDED", "Cumulative reviewer attempt budget exhausted")
             self.state["review_calls"] += 1
@@ -552,11 +603,12 @@ class LoopReviewController:
         adapter = self.reviewers[name]
         adapter.limits = self.config["limits"]
         adapter.progress = lambda stats: self._progress(key, stats)
-        adapter.cancel = self._check_budget
+        adapter.cancel = lambda: self._check_worker_budget(phase, name)
         response = None
         try:
             response = adapter.review(prompt, prepared["repo"], self.run_dir, attempt, prepared["read_dirs"])
             result = validate_result(response["result"], prepared["policy_paths"], ids)
+            result = self._coverage_question(result, phase, name)
             atomic_json(attempt / "result.json", result)
             atomic_json(attempt / "meta.json", response["meta"])
             atomic_json(slot / "checkpoint.json", {"digest": digest, "attempt": attempt.name,

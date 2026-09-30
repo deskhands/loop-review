@@ -129,11 +129,26 @@ expand: new defects remain unverified, and disagreement is a terminal outcome.
 Open questions prevent a passing conclusion.
 
 Default limits include six **total task attempts across resume**, 32 turns per
-task, 48 tool calls, three identical calls, two exposed provider retries, two million
+task, 48 tool calls, three identical calls, two exposed provider retries, eight million
 known cumulative tokens and 30 minutes of cumulative active execution. Limits can
 be configured before starting a run. Token totals include cached reads; an in-flight
 request may overshoot the ceiling. Unavailable usage/cost is explicitly unknown,
 and CLI-reported costs are not necessarily provider billing.
+
+The token ceiling is split equally between reviewers, with three quarters of each
+share for discovery and one quarter reserved for verification: 3M + 1M per reviewer
+by default. Fixes-only runs use the entire 4M share for verification. Failed attempts
+and resume consume the same phase allocation; unused allocations are not borrowed.
+Exhausting a phase stops that worker with `TASK_BUDGET_EXCEEDED`, allowing the peer
+to finish. Cancellation, active-time and total-run limits still stop both workers.
+
+Each reviewer reads only its own `audit/<phase>/<reviewer>/live-budget.json`, which
+shows remaining allowance without revealing peer progress. At 75% of tokens, turns
+or tools, it requests concise output and records a coverage follow-up question;
+such results cannot silently become a passing review. This finish request requires
+model cooperation; the hard ceiling remains enforced by the controller. Budget
+polls count as tools but are exempt from identical-read detection. Prompts guide
+focused auxiliary reads while requiring complete target and AGENTS.md coverage.
 
 Events and stderr are written during execution. Live status shows phase, task
 attempts, active time, last event, turns, tools and known usage. Timeouts, cancellation

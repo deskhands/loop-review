@@ -31,12 +31,21 @@ def render_final(state: Dict[str, Any], result: Dict[str, Any]) -> str:
         lines += [f"Failure: **{state['failure_code']}** — {state.get('message', '')}", "",
                   "Available findings below are partial evidence, not a passing review.", ""]
     lines += ["## Execution", "", f"Task attempts: {state['review_calls']} · Active time: {state['elapsed_seconds']:.1f}s", ""]
+    for key, budget in sorted(state.get('budgets', {}).items()):
+        if budget['token_limit']:
+            known = budget['known_tokens'] if budget['known_tokens'] is not None else 'unknown'
+            lines.append(f"- {key} budget: {known} / {budget['token_limit']} known tokens; "
+                         f"remaining allowance {budget['remaining_tokens']}; action **{budget['action']}**.")
     for key, progress in sorted(state.get('progress', {}).items()):
         tokens = progress.get('total_tokens')
         cost = progress.get('reported_cost')
         lines.append(f"- {key}: {progress.get('status', 'RUNNING')}; turns {progress.get('turns', 0)}, "
                      f"tools {progress.get('tool_calls', 0)}, tokens {tokens if tokens is not None else 'unknown'}, "
                      f"CLI-reported cost {cost if cost is not None else 'unknown'}.")
+        breakdown = ', '.join(f"{label} {progress.get(field) if progress.get(field) is not None else 'unknown'}"
+                              for field, label in [('input_tokens', 'uncached input'), ('cache_read_tokens', 'cache read'),
+                                                   ('cache_write_tokens', 'cache write'), ('output_tokens', 'output')])
+        lines.append(f"  Token breakdown: {breakdown}.")
     lines += ["", "CLI cost estimates may not match provider billing. Cached tokens are included in known token totals.", "",
               "## Findings", ""]
     if not result.get('findings'):

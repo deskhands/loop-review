@@ -143,6 +143,10 @@ def display(result: Dict[str, Any]) -> str:
         lines.append(f"{key}: {progress.get('status', 'RUNNING')}; turns={progress.get('turns', 0)}, "
                      f"tools={progress.get('tool_calls', 0)}, tokens={progress.get('total_tokens', 'unknown')}, "
                      f"last_event={progress.get('last_event_at', 'unknown')}")
+    for key, budget in result.get('budgets', {}).items():
+        if budget['token_limit']:
+            lines.append(f"{key} budget: known={budget['known_tokens'] if budget['known_tokens'] is not None else 'unknown'}, "
+                         f"limit={budget['token_limit']}, remaining={budget['remaining_tokens']}, action={budget['action']}")
     if result.get("failure_code"):
         lines.append(f"{result['failure_code']}: {result.get('message', '')}")
     return "\n".join(lines)

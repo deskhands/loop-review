@@ -39,6 +39,19 @@ exposed as events. Wall time, turns, tools, repeated calls, prompt/output size a
 cancellation also bound tasks. Active wall time is checkpointed during supervision;
 waiting between resumes does not spend active time. No automatic full-task retries.
 
+Token allocations are fixed: each reviewer receives half the run ceiling, with
+75% for discovery and 25% reserved for verification. Fixes-only verification gets
+the entire reviewer share. Every attempt consumes its phase allowance. A phase
+ceiling raises TASK_BUDGET_EXCEEDED for that worker; the peer may finish. The run
+then reports FAILED with partial evidence. Global limits/cancellation still stop
+both workers. Unused allowances are not transferred.
+
+Private live-budget.json files contain only their reviewer's phase allowance and
+usage. At 75% of tokens, turns or tools, action becomes finish. This asks the model
+to return evidence and missing coverage; the controller also adds an open question
+so early output cannot imply a complete pass. Hard limits remain independent of
+cooperation. Changed budget policy/prompts require a new run, not legacy resume.
+
 Raw stdout/stderr are streamed into immutable attempt directories under `audit/`.
 Cancellation/timeouts terminate worker process groups and preserve partial events.
 A disappeared detached controller becomes ORPHANED on status inspection. Resume

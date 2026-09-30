@@ -114,7 +114,7 @@ class ClaudeAdapter(ReviewerAdapter):
                                limits=self.limits, progress=self.progress, cancel=self.cancel)
         except LoopReviewError as e:
             duration_ms = int((time.time() - started) * 1000)
-            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
+            if e.code in ("TIMEOUT", "TASK_LIMIT_EXCEEDED", "TASK_BUDGET_EXCEEDED", "RUN_BUDGET_EXCEEDED", "CANCELED"):
                 if not (out_dir / "raw.stdout").exists():
                     write_text(out_dir / "raw.stdout", str(e.details.get("stdout", "")))
                 if not (out_dir / "raw.stderr").exists():
