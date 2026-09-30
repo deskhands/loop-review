@@ -240,7 +240,43 @@ class HardeningTests(unittest.TestCase):
                 "reviewer": "reviewer-a",
                 "from_adapter": "opencode",
                 "to_adapter": "pi",
-                "model": "qwen/qwen3.8-flash",
+                "from_model": "openrouter/qwen/qwen3.8-flash",
+                "to_model": "qwen/qwen3.8-flash",
+            }])
+
+    def test_resume_allows_known_glm_to_qwen_model_migration(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg_path = td / "config.toml"
+            cfg_path.write_text(
+                'version = 1\n'
+                '[paths]\nrun_root = "' + str(td / "runs") + '"\n'
+                '[loop]\nmax_cycles = 2\nmax_model_calls = 6\n'
+                '[reviewers.qwen]\nadapter = "pi"\nexecutable = "/bin/false"\nmodel = "qwen/qwen3.8-flash"\nreasoning = "high"\ntimeout_seconds = 1\n'
+                '[reviewers.deepseek]\nadapter = "claude"\nexecutable = "/bin/false"\nmodel = "deepseek-flash[1m]"\nreasoning = "max"\ntimeout_seconds = 1\n'
+            )
+            controller = LoopReviewController(load_config(cfg_path), Path(__file__).resolve().parents[1])
+            manifest = {
+                "reviewers": {
+                    "reviewer-a": {
+                        "adapter": "pi",
+                        "model": "z-ai/glm-5.3-flash",
+                        "reasoning": "high",
+                    },
+                    "reviewer-b": {
+                        "adapter": "claude",
+                        "model": "deepseek-flash[1m]",
+                        "reasoning": "max",
+                    },
+                }
+            }
+            migrations = controller._verify_resume_config(manifest)
+            self.assertEqual(migrations, [{
+                "reviewer": "reviewer-a",
+                "from_adapter": "pi",
+                "to_adapter": "pi",
+                "from_model": "z-ai/glm-5.3-flash",
+                "to_model": "qwen/qwen3.8-flash",
             }])
 
     def test_resume_reads_legacy_reviewer_a_artifact_paths(self):

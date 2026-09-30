@@ -530,7 +530,12 @@ class LoopReviewController:
             current_model = str(current.get("model", ""))
             old_canonical = old_model.removeprefix("openrouter/")
             current_canonical = current_model.removeprefix("openrouter/")
-            if old_canonical != current_canonical:
+            model_migration = (
+                alias == "reviewer-a"
+                and old_canonical == "z-ai/glm-5.3-flash"
+                and current_canonical == "qwen/qwen3.8-flash"
+            )
+            if old_canonical != current_canonical and not model_migration:
                 raise LoopReviewError(
                     "RESUME_CONFIG_CHANGED",
                     f"{alias} model changed since the failed run",
@@ -545,19 +550,22 @@ class LoopReviewController:
 
             old_adapter = old.get("adapter")
             current_adapter = current.get("adapter")
-            if old_adapter == current_adapter:
-                continue
-            if (
+            adapter_migration = (
                 alias == "reviewer-a"
                 and old_adapter in ("opencode", "claude")
                 and current_adapter == "pi"
-            ):
-                migrations.append({
+            )
+            if model_migration or adapter_migration:
+                migration = {
                     "reviewer": alias,
                     "from_adapter": old_adapter,
                     "to_adapter": current_adapter,
-                    "model": current_model,
-                })
+                    "from_model": old_model,
+                    "to_model": current_model,
+                }
+                migrations.append(migration)
+                continue
+            if old_adapter == current_adapter:
                 continue
             raise LoopReviewError(
                 "RESUME_CONFIG_CHANGED",
@@ -697,6 +705,12 @@ class LoopReviewController:
             "reviewer_migrations": list(state.get("reviewer_migrations", [])),
         } if reuse_checkpoints else None
         summaries: List[str] = []
+        model_migrated_names = {
+            "qwen"
+            for item in state.get("reviewer_migrations", [])
+            if item.get("reviewer") == "reviewer-a"
+            and item.get("from_model") != item.get("to_model")
+        }
 
         preflight_ok = (
             not state.get("reviewer_migrations")
@@ -721,7 +735,7 @@ class LoopReviewController:
             checkpoint = None
             checkpoint_dir = self._existing_round_dir(run_dir, "00-discovery", name)
             checkpoint_dirs[name] = checkpoint_dir
-            if reuse_checkpoints:
+            if reuse_checkpoints and name not in model_migrated_names:
                 checkpoint = self._checkpoint_result(
                     name=name,
                     out_dir=checkpoint_dir,
@@ -829,7 +843,7 @@ class LoopReviewController:
                 out_dir = self._round_dir(run_dir, round_name, name)
                 checkpoint_dir = self._existing_round_dir(run_dir, round_name, name)
                 checkpoint = None
-                if reuse_checkpoints:
+                if reuse_checkpoints and name not in model_migrated_names:
                     checkpoint = self._checkpoint_result(
                         name=name,
                         out_dir=checkpoint_dir,
