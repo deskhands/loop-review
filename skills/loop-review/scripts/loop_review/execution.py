@@ -129,18 +129,20 @@ def stream_review(
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     except FileNotFoundError:
         raise LoopReviewError("CLI_NOT_FOUND", f"Executable not found: {argv[0]}")
-    atomic_json(out_dir / "process.json", {"pid": proc.pid})
-    selector = selectors.DefaultSelector()
-    assert proc.stdout is not None and proc.stderr is not None
-    files = {proc.stdout.fileno(): (out_dir / "raw.stdout").open("wb", buffering=0),
-             proc.stderr.fileno(): (out_dir / "raw.stderr").open("wb", buffering=0)}
-    for pipe in (proc.stdout, proc.stderr):
-        os.set_blocking(pipe.fileno(), False)
-        selector.register(pipe, selectors.EVENT_READ)
+    selector = None
+    files = {}
     pending = b""
     total_bytes = 0
-    error: Optional[LoopReviewError] = None
+    error: Optional[Exception] = None
     try:
+        # Cleanup ownership begins immediately after spawning, including setup I/O.
+        atomic_json(out_dir / "process.json", {"pid": proc.pid})
+        selector = selectors.DefaultSelector()
+        assert proc.stdout is not None and proc.stderr is not None
+        for pipe, filename in ((proc.stdout, "raw.stdout"), (proc.stderr, "raw.stderr")):
+            files[pipe.fileno()] = (out_dir / filename).open("wb", buffering=0)
+            os.set_blocking(pipe.fileno(), False)
+            selector.register(pipe, selectors.EVENT_READ)
         while selector.get_map():
             if cancel:
                 cancel()
@@ -170,22 +172,27 @@ def stream_review(
             if time.monotonic() - started >= timeout:
                 raise LoopReviewError("TIMEOUT", f"Reviewer timed out after {timeout}s")
             time.sleep(0.05)
-    except LoopReviewError as caught:
+    except Exception as caught:
         error = caught
     finally:
         stop_group(proc)
-        selector.close()
+        if selector is not None:
+            selector.close()
         for output in files.values():
             output.close()
-        proc.stdout.close()
-        proc.stderr.close()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
         (out_dir / "process.json").unlink(missing_ok=True)
         meta = {"status": "FAILED" if error else "OK", "duration_ms": int((time.monotonic() - started) * 1000),
                 "exit_code": None if error else proc.returncode, **monitor.stats}
         atomic_json(out_dir / "stream.json", meta)
+    if error and not isinstance(error, LoopReviewError):
+        raise error
     stdout = (out_dir / "raw.stdout").read_text(encoding="utf-8", errors="replace")
     stderr = (out_dir / "raw.stderr").read_text(encoding="utf-8", errors="replace")
-    if error:
+    if isinstance(error, LoopReviewError):
         error.details.update({"stdout": stdout, "stderr": stderr, "stats": monitor.stats})
         atomic_json(out_dir / "error.json", {"code": error.code, "message": error.message})
         raise error

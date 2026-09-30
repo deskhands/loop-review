@@ -1,9 +1,11 @@
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from support import ReviewCase, SKILL
 
@@ -94,3 +96,22 @@ else:
         output = json.loads(self.cli('status', '--run', 'abcdef', '--json').stdout)
         self.assertTrue(output['legacy'])
         self.assertNotEqual(self.cli('resume', '--run', 'abcdef', check=False).returncode, 0)
+
+    def test_status_reloads_under_lock_before_marking_orphan(self):
+        spec = importlib.util.spec_from_file_location('review_cli', SKILL / 'scripts' / 'loop_review.py')
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        state = self.controller.prepare(self.invocation())
+        directory = Path(state['run_dir'])
+        (directory / 'audit').mkdir(exist_ok=True)
+        (directory / 'audit' / 'job.json').write_text(json.dumps({'pid': 99999999}))
+        flock = cli.fcntl.flock
+        def completed_before_lock(fd, operation):
+            current = json.loads((directory / 'status.json').read_text())
+            current['status'] = 'FROZEN_PASS'
+            (directory / 'status.json').write_text(json.dumps(current))
+            return flock(fd, operation)
+        with patch.object(cli.fcntl, 'flock', side_effect=completed_before_lock):
+            observed = cli.run_status(self.controller.store, state['run_id'])
+        self.assertEqual(observed['status'], 'FROZEN_PASS')
+        self.assertEqual(json.loads((directory / 'status.json').read_text())['status'], 'FROZEN_PASS')

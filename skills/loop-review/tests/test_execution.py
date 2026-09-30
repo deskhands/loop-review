@@ -6,11 +6,12 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from support import SKILL
 from loop_review.adapters.pi import PiAdapter
-from loop_review.execution import DEFAULT_LIMITS
+from loop_review.execution import DEFAULT_LIMITS, stream_review
 from loop_review.util import LoopReviewError
 
 
@@ -76,3 +77,18 @@ class ExecutionTests(unittest.TestCase):
             with self.assertRaises(LoopReviewError) as caught:
                 self.adapter(program, timeout=1).review('prompt', directory, directory, directory / 'out')
             self.assertEqual(caught.exception.code, 'TIMEOUT')
+
+    def test_setup_io_failure_reaps_worker(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            spawned = []
+            original = subprocess.Popen
+            def spawn(*args, **kwargs):
+                proc = original(*args, **kwargs)
+                spawned.append(proc)
+                return proc
+            with patch('loop_review.execution.subprocess.Popen', side_effect=spawn), patch('loop_review.execution.atomic_json', side_effect=OSError('disk failure')):
+                with self.assertRaises(OSError):
+                    stream_review([sys.executable, '-c', 'import time;time.sleep(20)'], cwd=directory,
+                                  out_dir=directory / 'out', timeout=10, limits=DEFAULT_LIMITS)
+            self.assertIsNotNone(spawned[0].poll())

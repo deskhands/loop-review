@@ -73,6 +73,9 @@ def run_status(store: RunStore, run_id: Optional[str]) -> Dict[str, Any]:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return state
+            state = load_json(path)
+            if state["status"] not in ACTIVE:
+                return state
             job_path = directory / "audit" / "job.json"
             if job_path.exists() and not _pid_alive(int(load_json(job_path)["pid"])):
                 state.update(status="ORPHANED", updated_at=timestamp(), failure_code="ORPHANED",
@@ -102,6 +105,7 @@ def start_detached(directory: Path, config_path: Path, *, resume: bool = False) 
             atomic_json(archive / "status.json", state)
             result = load_json(directory / "result.json")
             atomic_json(archive / "result.json", result)
+            (audit / "cancel.json").unlink(missing_ok=True)
             state.update(status="RESUMING", updated_at=timestamp())
             state.pop("failure_code", None)
             state.pop("message", None)

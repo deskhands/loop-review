@@ -406,6 +406,7 @@ class LoopReviewController:
                 "request_sha256": sha256_file(prepared["request_path"]),
                 "invocation_sha256": sha256_file(self.run_dir / "input" / "invocation.json"),
                 "history_sha256": sha256_file(self.run_dir / "input" / "history.json"),
+                "prompt_sha256": self._prompt_fingerprint(prepared),
             }
             atomic_json(self.run_dir / "manifest.json", manifest)
             self.state["status"] = "PREPARED_DRY_RUN" if dry_run else "PREPARED"
@@ -447,6 +448,18 @@ class LoopReviewController:
         if len(prompt.encode()) > self.config["limits"]["max_prompt_bytes"]:
             raise LoopReviewError("PROMPT_LIMIT_EXCEEDED", "Review prompt exceeds configured byte limit; narrow the review scope")
         return prompt
+
+    def _prompt_fingerprint(self, prepared: Dict[str, Any]) -> Dict[str, str]:
+        return {f"{phase}/{name}": sha256_bytes(self._prompt(prepared, name, phase, []).encode())
+                for phase in ("discovery", "verification") for name in self.reviewers}
+
+    def _reconcile_usage(self) -> None:
+        # Terminal stream accounting can survive a controller crash before status publication.
+        for stream in (self.run_dir / "audit").glob("*/*/attempt-*/stream.json"):
+            key = str(stream.parent.relative_to(self.run_dir / "audit"))
+            stats = self.state["progress"].setdefault(key, {})
+            stats.update(load_json(stream))
+            stats["status"] = "OK" if (stream.parent / "result.json").exists() else "FAILED"
 
     def _elapsed(self) -> float:
         return self.prior_elapsed + (time.monotonic() - self.session_started if self.session_started else 0)
@@ -573,14 +586,22 @@ class LoopReviewController:
         self._publish()
         self.store.indexes()
         errors = []
-        work = {name: [claim for claim in claims if claim["origin"] != name] for name in self.reviewers}
+        base_questions = [] if phase == "discovery" else list(self.result["open_questions"])
+        work = {name: ([] if phase == "discovery" else [claim for claim in claims if claim["origin"] != name])
+                for name in self.reviewers}
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = {pool.submit(self._worker, name, phase, prepared, selected): name
                        for name, selected in work.items() if phase == "discovery" or selected}
             for future in concurrent.futures.as_completed(futures):
                 name = futures[future]
                 try:
-                    results[name] = future.result()
+                    output = future.result()
+                    with self.lock:
+                        results[name] = output
+                        current = discovery_claims(results) + claims if phase == "discovery" else claims
+                        self.result["findings"] = resolve_claims(current, results if phase == "verification" else {})
+                        self.result["open_questions"] = base_questions + [q for item in results.values() for q in item["open_questions"]]
+                        self._publish()
                 except Exception as error:
                     errors.append(error)
         if errors:
@@ -609,30 +630,37 @@ class LoopReviewController:
                     raise LoopReviewError("RESUME_NOT_SUPPORTED", "Legacy workflow is inspection-only")
                 if manifest["reviewers"] != self.config["reviewers"] or manifest["limits"] != self.config["limits"]:
                     raise LoopReviewError("RESUME_CONFIG_CHANGED", "Model, harness, reasoning or limits changed; start a new run")
+                self._reconcile_usage()
                 for label, path in (("request", prepared["request_path"]),
                                     ("invocation", self.run_dir / "input" / "invocation.json"),
                                     ("history", self.run_dir / "input" / "history.json")):
                     if sha256_file(path) != manifest[f"{label}_sha256"]:
                         raise LoopReviewError("RESUME_CHECKPOINT_INVALID", f"Persisted {label} changed")
+                if manifest["prompt_sha256"] != self._prompt_fingerprint(prepared):
+                    raise LoopReviewError("RESUME_CONFIG_CHANGED", "Prompt or rubric changed; start a new run")
                 if resume and self.state["status"] != "RESUMING":
                     archive = self.run_dir / "audit" / "resumes" / secrets.token_hex(4)
                     atomic_json(archive / "status.json", self.state)
                     atomic_json(archive / "result.json", load_json(self.run_dir / "result.json"))
-                if resume:
+                    # Clear the old request before exposing RESUMING. Detached launchers
+                    # already performed this transition; their new requests must survive.
                     (self.run_dir / "audit" / "cancel.json").unlink(missing_ok=True)
+                    self.state["status"] = "RESUMING"
+                    self._publish()
                 self.state.pop("failure_code", None)
                 self.state.pop("message", None)
                 history = load_json(self.run_dir / "input" / "history.json")
+                claims = history
                 self._check_budget()
                 if self.state["scope"] == "full":
-                    self._phase("discovery", prepared, [], discoveries)
+                    self._phase("discovery", prepared, history, discoveries)
                 claims = discovery_claims(discoveries) + history
                 self.result["findings"] = resolve_claims(claims, {})
                 self.result["open_questions"] = [q for result in discoveries.values() for q in result["open_questions"]]
                 if claims:
                     self._phase("verification", prepared, claims, verifications)
                 self.result["findings"] = resolve_claims(claims, verifications)
-                self.result["open_questions"] += [q for result in verifications.values() for q in result["open_questions"]]
+                self.result["open_questions"] = [q for result in [*discoveries.values(), *verifications.values()] for q in result["open_questions"]]
                 self._verify_fingerprint(prepared)
                 self._check_budget()
                 self.state["status"] = final_status(self.result["findings"], self.result["open_questions"], self.state["scope"])
