@@ -129,7 +129,7 @@ expand: new defects remain unverified, and disagreement is a terminal outcome.
 Open questions prevent a passing conclusion.
 
 Default limits include six **total task attempts across resume**, 32 turns per
-task, 48 tool calls, three identical calls, two exposed provider retries, eight million
+task, 96 tool calls, three identical calls, two exposed provider retries, eight million
 known cumulative tokens and 30 minutes of cumulative active execution. Limits can
 be configured before starting a run. Token totals include cached reads; an in-flight
 request may overshoot the ceiling. Unavailable usage/cost is explicitly unknown,
@@ -154,6 +154,16 @@ Events and stderr are written during execution. Live status shows phase, task
 attempts, active time, last event, turns, tools and known usage. Timeouts, cancellation
 and limits terminate entire worker process groups. Failures preserve successful
 peer evidence and generate an incomplete report.
+
+Turn limits use observed assistant calls. Claude's terminal `num_turns` is a
+separate audit counter; it can differ when a response invokes several tools.
+Successful terminal output rejected by the former counter mismatch can be recovered
+after replay and exact-input validation, without repeating discovery. Original
+failure artifacts remain intact and `recovery.json` records the corrected usage.
+
+Multi-document design reviews use `target.kind: "files"` with every required path;
+all files and their nested AGENTS.md rules are fingerprinted. One representative
+target with other documents mentioned only in prose is insufficient scope control.
 
 Resume reuses only exact call-input checkpoints (prompt, repository/target/policy
 fingerprint, reviewer configuration and protocol), validates checksums, and may

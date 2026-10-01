@@ -15,6 +15,8 @@ completion. The reviewed target stays unchanged.
 2. Create the [invocation](references/invocation.md). Supply a short meaningful
    `title` for this run and `task.title` for the work being reviewed. Reuse an
    explicit task ID for related work; similar titles alone never establish linkage.
+   For multiple required documents, use `target.kind: "files"` with every path.
+   Referenced context is not a substitute for full target coverage.
 3. Resolve `SKILL_ROOT` to this skill directory and start:
    ```bash
    python3 "$SKILL_ROOT/scripts/loop_review.py" run --invocation <file.json> --json
@@ -50,6 +52,9 @@ completion. The reviewed target stays unchanged.
   Successful exact-input checkpoints are reused. Failed attempts, active time and
   known tokens remain charged to the same budget. Config/input drift and exhausted
   budgets are errors; do not bypass them with silent retries or a fresh run.
+  A successful terminal rejected by the former CLI-turn counting bug can be
+  recovered after exact-input and budget checks. Raw failures stay intact and
+  `recovery.json` records corrected accounting; this does not repair missing coverage.
 - Cancel an active run with `cancel --run <run_id> --json`. Cancellation is recorded
   and supervised workers stop, including launcher descendants.
 - Historic v1 runs are inspection-only. Model/harness changes require a new run;

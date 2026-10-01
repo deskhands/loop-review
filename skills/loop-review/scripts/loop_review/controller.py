@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .adapters import ClaudeAdapter, PiAdapter
 from .agents_rules import discover_rules
-from .execution import DEFAULT_LIMITS
+from .execution import DEFAULT_LIMITS, EventMonitor
 from .git_state import (ensure_repo, git_range_fingerprint, repo_meta, working_tree_fingerprint,
                         write_range_diff, write_working_tree_diff)
 from .ledger import discovery_claims, final_status, resolve_claims
@@ -106,6 +106,16 @@ class LoopReviewController:
             except ValueError:
                 target_paths = []
             target_description = f"Read and review this complete target file: {target_path}"
+        elif target_kind == 'files':
+            paths = target.get('paths')
+            if not isinstance(paths, list) or not paths or any(not isinstance(p, str) for p in paths):
+                raise LoopReviewError('INVALID_INVOCATION', 'files target requires a nonempty paths list')
+            target_paths = [expand_path(path) for path in paths]
+            if len(target_paths) != len(set(target_paths)):
+                raise LoopReviewError('INVALID_INVOCATION', 'files target must not contain duplicate paths')
+            for index, path in enumerate(target_paths):
+                self._persist_source({'kind': 'file', 'path': str(path)}, input_dir, f'target-{index:03d}')
+            target_description = 'Read and review EVERY complete target file: ' + json.dumps([str(p) for p in target_paths])
         elif target_kind == "working-tree":
             if mode == "design":
                 raise LoopReviewError("INVALID_INVOCATION", "design mode does not support working-tree target")
@@ -151,7 +161,7 @@ class LoopReviewController:
         policy_paths = [x["path"] for x in rules["files"]]
 
         read_dirs: List[Path] = []
-        for candidate in (target_path, seed_review_path):
+        for candidate in (*target_paths, target_path, seed_review_path):
             if candidate is None:
                 continue
             try:
@@ -213,6 +223,9 @@ class LoopReviewController:
                 "sha256": sha256_file(target_path),
                 "size": target_path.stat().st_size,
             }
+        elif kind == 'files':
+            base_fp['target_files'] = [{'path': str(p), 'sha256': sha256_file(p), 'size': p.stat().st_size}
+                                       for p in prepared['target_paths']]
         elif kind == "working-tree" and target_path:
             base_fp["target_artifact"] = {
                 "path": str(target_path),
@@ -309,6 +322,11 @@ class LoopReviewController:
             except ValueError:
                 target_paths = []
             target_description = f"Read and review this complete target file: {target_path}"
+        elif target_kind == 'files':
+            for index, raw_path in enumerate(target['paths']):
+                _, path = self._load_persisted_source({'kind': 'file', 'path': raw_path}, input_dir, f'target-{index:03d}')
+                target_paths.append(path)
+            target_description = 'Read and review EVERY complete target file: ' + json.dumps([str(p) for p in target_paths])
         elif target_kind == "working-tree":
             target_path = input_dir / "target.diff"
             if not target_path.is_file():
@@ -350,7 +368,7 @@ class LoopReviewController:
         rules = load_json(input_dir / "agents-map.json")
         policy_paths = [item["path"] for item in rules["files"]]
         read_dirs: List[Path] = []
-        for candidate in (target_path, seed_review_path):
+        for candidate in (*target_paths, target_path, seed_review_path):
             if candidate is None:
                 continue
             try:
@@ -461,7 +479,40 @@ class LoopReviewController:
             key = str(stream.parent.relative_to(self.run_dir / "audit"))
             stats = self.state["progress"].setdefault(key, {})
             stats.update(load_json(stream))
+            corrected = self._terminal_turn_recovery(stream.parent)
+            if corrected is not None:
+                stats.update(corrected)
             stats["status"] = "OK" if (stream.parent / "result.json").exists() else "FAILED"
+
+    def _terminal_turn_recovery(self, attempt: Path) -> Optional[Dict[str, Any]]:
+        # Recover only the known false rejection at a successful Claude terminal.
+        # Original failure artifacts remain immutable; other failures still retry.
+        error_path = attempt / 'error.json'
+        if not error_path.exists() or attempt.parent.name != 'reviewer-b':
+            return None
+        error = load_json(error_path)
+        if error.get('code') != 'TASK_LIMIT_EXCEEDED' or error.get('message') != 'Reviewer exceeded turns limit':
+            return None
+        stream = load_json(attempt / 'stream.json')
+        if stream.get('exit_code') is not None or (stream.get('turns') or 0) <= self.config['limits']['max_turns']:
+            return None
+        raw_path = attempt / 'raw.stdout'
+        try:
+            raw = raw_path.read_text()
+            terminal = json.loads(raw.rstrip().splitlines()[-1])
+            if (terminal.get('type') != 'result' or terminal.get('subtype') != 'success'
+                    or terminal.get('is_error') is not False
+                    or terminal.get('terminal_reason', 'completed') != 'completed'
+                    or terminal.get('num_turns') != stream.get('turns')):
+                return None
+            monitor = EventMonitor(self.config['limits'], budget_path=attempt.parent / 'live-budget.json')
+            for line in raw.splitlines():
+                monitor.feed(line)
+            if not monitor.stats['turns']:
+                return None
+            return monitor.stats
+        except (OSError, ValueError, IndexError, AttributeError, LoopReviewError):
+            return None
 
     def _elapsed(self) -> float:
         return self.prior_elapsed + (time.monotonic() - self.session_started if self.session_started else 0)
@@ -562,7 +613,10 @@ class LoopReviewController:
             call_path, stream_path = attempt / "call.json", attempt / "stream.json"
             if not call_path.exists() or not stream_path.exists() or load_json(call_path).get("digest") != digest:
                 continue
+            corrected = None
             if load_json(stream_path).get("exit_code") != 0:
+                corrected = self._terminal_turn_recovery(attempt)
+            if load_json(stream_path).get("exit_code") != 0 and corrected is None:
                 continue
             try:
                 raw = (attempt / "raw.stdout").read_text()
@@ -570,6 +624,13 @@ class LoopReviewController:
             except (LoopReviewError, OSError):
                 continue
             result = self._coverage_question(result, slot.parent.name, name)
+            if corrected is not None:
+                with self.lock:
+                    key = str(attempt.relative_to(self.run_dir / 'audit'))
+                    self.state['progress'][key].update(corrected)
+                    self._check_worker_budget(slot.parent.name, name)
+                atomic_json(attempt / 'recovery.json', {'reason': 'terminal_turn_accounting',
+                            'raw_sha256': sha256_file(attempt / 'raw.stdout'), 'stats': corrected})
             atomic_json(attempt / "result.json", result)
             atomic_json(checkpoint, {"digest": digest, "attempt": attempt.name,
                                      "result_sha256": sha256_file(attempt / "result.json")})

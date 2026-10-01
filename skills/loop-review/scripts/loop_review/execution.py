@@ -14,7 +14,7 @@ from .util import LoopReviewError, atomic_json
 
 
 DEFAULT_LIMITS = {
-    "max_task_attempts": 6, "max_turns": 32, "max_tool_calls": 48,
+    "max_task_attempts": 6, "max_turns": 32, "max_tool_calls": 96,
     "max_identical_tool_calls": 3, "max_provider_retries": 2,
     "max_total_tokens": 8_000_000, "max_run_seconds": 1800,
     "max_prompt_bytes": 65_536, "max_output_bytes": 52_428_800,
@@ -46,6 +46,8 @@ class EventMonitor:
         if not isinstance(event, dict):
             return
         kind = event.get("type")
+        if kind == 'system' and event.get('subtype') == 'thinking_tokens':
+            return  # Per-token telemetry is not a turn or a usage checkpoint.
         if kind == "turn_start":
             self.stats["turns"] += 1
         elif kind == "auto_retry_start":
@@ -71,7 +73,9 @@ class EventMonitor:
             if isinstance(event.get("total_cost_usd"), (int, float)):
                 self.stats["reported_cost"] = event["total_cost_usd"]
             if isinstance(event.get("num_turns"), int):
-                self.stats["turns"] = max(self.stats["turns"], event["num_turns"])
+                # CLI summary counters can count tool transitions differently.
+                # Enforce observed assistant calls; preserve the CLI value for audit.
+                self.stats['cli_reported_turns'] = event['num_turns']
         self.stats["last_event_at"] = time.time()
         for key in ("turns", "tool_calls", "identical_tool_calls", "provider_retries"):
             value = self.stats.get("max_identical_tool_calls" if key == "identical_tool_calls" else key, 0)

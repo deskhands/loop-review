@@ -109,6 +109,26 @@ class BudgetTests(ReviewCase):
 
 
 class UsageTests(ReviewCase):
+    def test_terminal_cli_turns_do_not_replace_observed_assistant_turns(self):
+        monitor = EventMonitor(DEFAULT_LIMITS)
+        for index in range(15):
+            for _ in range(3):
+                monitor.feed(json.dumps({'type': 'assistant', 'message': {'id': f'message-{index}', 'content': []}}))
+        monitor.feed(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'num_turns': 45}))
+        self.assertEqual(monitor.stats['turns'], 15)
+        self.assertEqual(monitor.stats['cli_reported_turns'], 45)
+
+    def test_real_assistant_turn_limit_and_telemetry_filter(self):
+        observed = []
+        monitor = EventMonitor(DEFAULT_LIMITS, observed.append)
+        for _ in range(100):
+            monitor.feed(json.dumps({'type': 'system', 'subtype': 'thinking_tokens'}))
+        self.assertEqual(observed, [])
+        with self.assertRaises(LoopReviewError) as caught:
+            for index in range(33):
+                monitor.feed(json.dumps({'type': 'assistant', 'message': {'id': f'message-{index}', 'content': []}}))
+        self.assertEqual(caught.exception.code, 'TASK_LIMIT_EXCEEDED')
+
     def test_only_own_budget_reads_escape_identical_call_limit(self):
         monitor = EventMonitor(DEFAULT_LIMITS, budget_path=Path('/own/live-budget.json'))
         for _ in range(5):

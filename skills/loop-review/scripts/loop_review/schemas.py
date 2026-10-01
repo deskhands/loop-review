@@ -71,8 +71,14 @@ def validate_result(
         if not finding["title"].strip() or not finding["claim"].strip() or not finding["evidence"]:
             raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Findings require a claim and source evidence")
         for ref in finding["rule_refs"]:
-            if ref["path"] not in expected or not finding["blocking"]:
-                raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Rule violations must cite an applicable policy and block")
+            if ref["path"] not in expected:
+                raise LoopReviewError("SCHEMA_VALIDATION_FAILED", "Rule references must cite an applicable policy")
+        if finding['rule_refs'] and not finding['blocking']:
+            # A policy citation alone does not establish a blocking violation.
+            # Retain the claim, but require classification follow-up before passing.
+            question = f"Policy classification needs follow-up: {finding['title']} cites AGENTS.md but is non-blocking."
+            if question not in obj['open_questions']:
+                obj['open_questions'].append(question)
     seen = [item["finding_id"] for item in obj["adjudications"]]
     required = set(active_finding_ids or [])
     if len(seen) != len(set(seen)) or set(seen) != required:

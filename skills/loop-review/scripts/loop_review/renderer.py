@@ -46,6 +46,8 @@ def render_final(state: Dict[str, Any], result: Dict[str, Any]) -> str:
                               for field, label in [('input_tokens', 'uncached input'), ('cache_read_tokens', 'cache read'),
                                                    ('cache_write_tokens', 'cache write'), ('output_tokens', 'output')])
         lines.append(f"  Token breakdown: {breakdown}.")
+        if progress.get('cli_reported_turns') is not None:
+            lines.append(f"  CLI summary turns {progress['cli_reported_turns']} (separate counter; limit uses observed assistant calls).")
     lines += ["", "CLI cost estimates may not match provider billing. Cached tokens are included in known token totals.", "",
               "## Findings", ""]
     if not result.get('findings'):
