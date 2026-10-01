@@ -34,6 +34,8 @@ class TerminalRecoveryTests(ReviewCase):
         self.assertEqual(state['status'], 'FROZEN_CHANGES_REQUIRED')
         self.assertEqual(state['review_calls'], 3)  # Two old discoveries, one peer verification.
         self.assertEqual(len(self.b.prompts), 1)
+        key = str(attempt.relative_to(directory / 'audit'))
+        self.assertEqual(state['progress'][key]['status'], 'RECOVERED')
         recovery = json.loads((attempt / 'recovery.json').read_text())
         self.assertEqual(recovery['stats']['turns'], 15)
         self.assertEqual(recovery['stats']['cli_reported_turns'], 45)

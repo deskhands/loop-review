@@ -482,7 +482,7 @@ class LoopReviewController:
             corrected = self._terminal_turn_recovery(stream.parent)
             if corrected is not None:
                 stats.update(corrected)
-            stats["status"] = "OK" if (stream.parent / "result.json").exists() else "FAILED"
+            stats['status'] = ('RECOVERED' if (stream.parent / 'recovery.json').exists() else 'OK') if (stream.parent / 'result.json').exists() else 'FAILED'
 
     def _terminal_turn_recovery(self, attempt: Path) -> Optional[Dict[str, Any]]:
         # Recover only the known false rejection at a successful Claude terminal.
@@ -634,6 +634,9 @@ class LoopReviewController:
             atomic_json(attempt / "result.json", result)
             atomic_json(checkpoint, {"digest": digest, "attempt": attempt.name,
                                      "result_sha256": sha256_file(attempt / "result.json")})
+            with self.lock:
+                key = str(attempt.relative_to(self.run_dir / 'audit'))
+                self.state['progress'][key]['status'] = 'RECOVERED' if corrected is not None else 'OK'
             return result
         return None
 
