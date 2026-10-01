@@ -1,120 +1,53 @@
-# Outer Agent Acceptance
+# Final synthesis and acceptance
 
-The outer agent that initiated `loop-review` must evaluate the frozen review before presenting it as accepted.
+The initiating agent completes `final-review.md` before handing it to the user.
+Read the original request and this document first. Inspect source or machine
+artifacts only to resolve a concrete material doubt; this is a bounded synthesis
+of existing review evidence, not another discovery loop.
 
-This is a separate layer from Python convergence.
+## One standalone deliverable
 
-## Responsibilities
+The final document must contain:
 
-The controller decides whether the review process converged and emits one of its review states, such as:
+- the overall recommendation, actual scope and coverage limits;
+- the original request, targets, repository snapshot and reviewer identities;
+- confirmed, contested, unverified and resolved historical items, with stable IDs;
+- both the original claim and cross-check evidence, including source locations;
+- a next action for each material item and the remaining follow-up questions.
 
-- `FROZEN_PASS`
-- `FROZEN_CHANGES_REQUIRED`
-- `FROZEN_DISPUTED`
-- `UNRESOLVED_MAX_CYCLES`
+Write the final synthesis in the user's language. Reconcile stale discovery
+questions using cross-check evidence; retain any uncertainty that evidence does
+not settle. Separate defects, optional improvements, implementation-time checks
+and missing review coverage. A rejected finding is not automatically disproved:
+check material counter-evidence before dismissing it. Explain any final disposition
+that differs from the ledger; preserve the ledger and raw artifacts unchanged.
 
-The outer agent decides whether to accept that review conclusion in the context of the user's original request.
+Update `report.md` to the same content for compatibility. Return the link to
+`final-review.md`, with a concise recommendation. The receiving user or agent
+should understand the conclusions without `status.json`, `result.json` or `audit/`.
+Those files remain available for diagnostics and recovery.
 
-Do not ask either reviewer worker to make this acceptance decision.
+## Acceptance of the review conclusion
 
-## Required inputs
+Record one of these dispositions, with the specific reason, in the final document:
 
-Always inspect:
+- **ACCEPTED**: the conclusion is consistent with the request, project rules and
+  evidence. This accepts the review conclusion, not necessarily the reviewed target.
+- **REJECTED**: a material conclusion conflicts with the request or evidence.
+  Explain the contradiction without silently replacing the model positions.
+- **NEEDS_FOLLOWUP**: a specific material question or missing coverage prevents
+  acceptance of the requested overall conclusion. State what remains to check.
 
-1. the original user request available in the outer conversation;
-2. `status.json`;
-3. `report.md`.
+For `FAILED`, `CANCELED` or `ORPHANED`, record incomplete execution and its failure
+code instead of an acceptance disposition. Retained findings are partial evidence.
+For `FIXES_VERIFIED`, accept only the specified fixes, not the entire target.
 
-Inspect these when needed to resolve doubt, disagreement, missing evidence, or apparent misunderstanding:
+`UNRESOLVED_MAX_CYCLES` is a compatibility name for a completed bounded review
+with questions or unverified claims. It does not mean the controller must keep
+running. Judge the materiality of each remaining question; incidental uncertainty
+does not automatically block the design. Disagreement may remain in a useful final
+review document. Reviewer agreement alone does not prove correctness.
 
-- `result.json`
-- individual `audit/**/result.json`
-- the original target and applicable `AGENTS.md`
-
-The outer agent should not summarize away material user constraints before making the acceptance decision.
-
-## Acceptance statuses
-
-Use exactly one:
-
-### ACCEPTED
-
-Use when the frozen review is materially consistent with the user's original goal, applicable project rules, and the cited evidence.
-
-`ACCEPTED` means the outer agent accepts the **review conclusion**.
-
-It does not necessarily mean the reviewed design/code itself is acceptable.
-
-For example:
-
-- `FROZEN_PASS + ACCEPTED`: accept the conclusion that no blocking issue remains.
-- `FROZEN_CHANGES_REQUIRED + ACCEPTED`: accept the conclusion that changes are required.
-
-### REJECTED
-
-Use when the frozen review conclusion itself is materially unsound, for example because it:
-
-- misunderstood the original user goal;
-- conflicts with an applicable `AGENTS.md`;
-- relies on materially incorrect or missing evidence;
-- treats an unjustified assumption as a requirement;
-- clearly omits information already available to the outer agent that changes the conclusion.
-
-State the concrete reason for rejection. Do not silently replace the frozen review with a different conclusion.
-
-### NEEDS_FOLLOWUP
-
-Use when the outer agent cannot responsibly accept or reject the review yet, including:
-
-- `FROZEN_DISPUTED` where the remaining disagreement is material;
-- `UNRESOLVED_MAX_CYCLES`;
-- missing context or evidence that prevents a sound acceptance decision;
-- a result that requires a user decision on a genuine tradeoff.
-
-Explain the specific follow-up required.
-
-## Decision discipline
-
-Do not rerun the loop merely because the outer agent personally prefers a different style.
-
-Do not reject a review because it returned `FROZEN_CHANGES_REQUIRED`; that state may be correct and should then be `ACCEPTED`.
-
-Do not equate reviewer agreement with correctness. Verify material conclusions against the original request and evidence.
-
-Do not create a second hidden review loop in the outer layer. The acceptance pass should be bounded: inspect the final result first, drill into result/attempt artifacts only when a concrete doubt requires it.
-
-For `FIXES_VERIFIED`, explicitly accept only the specified fixes, not the entire target.
-
-If the controller status is `FAILED`, `CANCELED`, or `ORPHANED`, do not assign one of the three acceptance statuses. Report the failure code and run directory instead.
-
-## User-facing report
-
-Keep the two layers explicit:
-
-```text
-Review status: FROZEN_CHANGES_REQUIRED
-Outer acceptance: ACCEPTED
-
-Reason:
-The two reviewers converged on F001/F003 with source evidence, the findings match the original request and applicable AGENTS.md, and no material contradiction was found.
-```
-
-If rejected:
-
-```text
-Review status: FROZEN_PASS
-Outer acceptance: REJECTED
-
-Reason:
-The review treated an optional future requirement as mandatory, contrary to the original request and the repository's anti-overengineering rule.
-```
-
-If follow-up is required:
-
-```text
-Review status: FROZEN_DISPUTED
-Outer acceptance: NEEDS_FOLLOWUP
-
-Reason:
-F002 remains a material correctness dispute with conflicting source evidence; user or implementation owner input is required.
-```
+Finish the document even when the conclusion needs follow-up. Avoid automatic
+reruns, new reviewer calls or requiring all findings to reach consensus before
+delivering recommendations.

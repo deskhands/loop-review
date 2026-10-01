@@ -18,7 +18,7 @@ from .git_state import (ensure_repo, git_range_fingerprint, repo_meta, working_t
                         write_range_diff, write_working_tree_diff)
 from .ledger import discovery_claims, final_status, resolve_claims
 from .prompts import build_prompt
-from .renderer import render_final
+from .renderer import publish_reports
 from .schemas import validate_result
 from .store import RunStore, timestamp
 from .util import LoopReviewError, atomic_json, expand_path, load_json, sha256_bytes, sha256_file, write_text
@@ -556,9 +556,9 @@ class LoopReviewController:
                 self.state['budgets'][f'{phase}/{name}'] = budget
                 atomic_json(self.run_dir / 'audit' / phase / name / 'live-budget.json', budget)
         self.result["status"] = self.state["status"]
+        publish_reports(self.run_dir, self.state, self.result)
         atomic_json(self.run_dir / "status.json", self.state)
         atomic_json(self.run_dir / "result.json", self.result)
-        write_text(self.run_dir / "report.md", render_final(self.state, self.result))
 
     def _check_budget(self) -> None:
         with self.lock:
@@ -800,7 +800,7 @@ class LoopReviewController:
         self._publish()
         self.store.indexes()
         error.details = {"run_dir": str(self.run_dir), "run_id": self.state["run_id"],
-                         "status_path": str(self.run_dir / "status.json"), "report_path": str(self.run_dir / "report.md")}
+                         "status_path": str(self.run_dir / "status.json"), "report_path": self.state['report_path']}
         return error
 
     def run(self, invocation_path: Path, dry_run: bool = False) -> Dict[str, Any]:

@@ -73,18 +73,26 @@ loop-review/
         ├── task.json
         ├── README.md
         └── 2026-09-30_193000__design__修改方案复核__a1b2c3d4/
-            ├── report.md
+            ├── final-review.md       # standalone review and recommendations
+            ├── report.md             # identical compatibility copy
             ├── status.json
             ├── result.json
             ├── manifest.json
             ├── input/
             └── audit/
+                └── execution.md     # usage, limits and process diagnostics
 ```
 
 Titles identify the purpose; IDs identify exact runs. The same run ID is used for
 background job commands. Root/repository/task indexes link reports and show the
 latest known phase or conclusion. `status.json` is authoritative; controller logs
-and prior resume snapshots never override it.
+and prior resume snapshots never override it. `report_path` points to
+`final-review.md`. Hand that single document to the user or another agent: it
+contains the request, target snapshot, coverage limits, classified findings,
+cross-check evidence and recommended actions. Process artifacts are for diagnosis.
+An unresolved review still has a final document; it does not imply full coverage
+or target approval. The initiating agent completes a bounded synthesis in that
+document using existing evidence, without another paid reviewer call.
 
 Supply `task.id`, `task.title`, and a run `title` in the
 [invocation](skills/loop-review/references/invocation.md). A matching title alone

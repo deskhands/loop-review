@@ -1,6 +1,6 @@
 ---
 name: loop-review
-description: Run a bounded, read-only two-model review of code, a design proposal, or an existing review. Use for independent discovery and cross-verification, or targeted verification of fixes from a prior review. Preserve inputs and evidence, finish with confirmed/disputed/unverified findings, and return a readable report.
+description: Run a bounded, read-only two-model review of code, a design proposal, or an existing review. Use for independent discovery and cross-verification, or targeted verification of fixes from a prior review. Preserve inputs and evidence, and deliver one standalone final review with conclusions, uncertainty and recommended actions.
 ---
 
 # loop-review
@@ -30,12 +30,20 @@ completion. The reviewed target stays unchanged.
    While active, report the phase/progress and retain that run ID. Avoid repeated
    short polling and duplicate runs. Use `list --json` to locate a lost ID; inspect
    title, repository and task rather than assuming the global latest is yours.
-5. At completion, read `report.md` and `status.json` in the returned run directory.
-   Read `result.json` for precise claims/positions; raw audit files only for a
-   concrete diagnostic question. Report confirmed findings, disagreements and
-   unverified claims separately. A completed review can require changes.
-6. Apply [outer acceptance](references/outer-agent-acceptance.md) to the conclusion,
-   bounded to material evidence and the original request. Agreement is not proof.
+5. At completion, read the returned `report_path`: **`final-review.md`**. It is the
+   standalone deliverable, including the original request, targets, coverage,
+   confirmed/contested/unverified/resolved claims, both sides' evidence and next
+   actions. A completed review can require changes or leave questions unresolved.
+6. Apply [outer acceptance](references/outer-agent-acceptance.md), bounded to the
+   original request and material evidence. Finish the same final document in the
+   user's language: state the recommendation and its limits, reconcile questions
+   answered by cross-check evidence, and distinguish remaining defects from
+   implementation checks and incomplete coverage. Preserve finding IDs, reviewer
+   positions and uncertainty; explain any evidence-based disposition that differs
+   from the ledger. Do not silently change machine results or start another model
+   review. Keep `report.md` byte-identical as a compatibility copy. Return a link
+   to `final-review.md`; the user or receiving Codex needs only that file.
+   Inspect machine/audit files only for a concrete doubt or diagnostic question.
 
 ## Related reviews and recovery
 
@@ -64,11 +72,14 @@ completion. The reviewed target stays unchanged.
 
 The controller performs parallel discovery and at most one parallel verification
 phase. Empty complete discoveries finish early. New verification findings remain
-unverified; disputes terminate without another debate loop. Partial failures still
-produce a report, and never receive a passing conclusion.
+unverified; disputes terminate without another debate loop. Every terminal path
+produces `final-review.md`; partial failures identify incomplete execution and
+available evidence, and never receive a passing conclusion. `UNRESOLVED_MAX_CYCLES`
+is a compatibility status name: the bounded review ended with questions or
+unverified claims, and still delivers final recommendations.
 
 Token budgets reserve verification capacity separately for each reviewer. Live
-status/report shows phase allowances and cache/input/output breakdowns. A finish
+status and `audit/execution.md` show phase allowances and token breakdowns. A finish
 warning asks the reviewer to return partial evidence; coverage questions prevent
 an early result from passing. If a phase hits TASK_BUDGET_EXCEEDED, inspect the
 partial report and narrow the next review's scope instead of silently retrying.

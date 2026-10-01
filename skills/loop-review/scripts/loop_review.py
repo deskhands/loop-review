@@ -17,9 +17,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from loop_review.config import DEFAULT_CONFIG, load_config
 from loop_review.controller import LoopReviewController
-from loop_review.renderer import LABELS, render_final
+from loop_review.renderer import LABELS, publish_reports
 from loop_review.store import RunStore, timestamp
-from loop_review.util import LoopReviewError, atomic_json, expand_path, load_json, write_text
+from loop_review.util import LoopReviewError, atomic_json, expand_path, load_json
 
 ACTIVE = {"INIT", "PREPARED", "RESUMING", "DISCOVERY", "VERIFICATION"}
 
@@ -82,9 +82,9 @@ def run_status(store: RunStore, run_id: Optional[str]) -> Dict[str, Any]:
                              message="Controller exited without a terminal result")
                 result = load_json(directory / "result.json")
                 result["status"] = "ORPHANED"
+                publish_reports(directory, state, result)
                 atomic_json(path, state)
                 atomic_json(directory / "result.json", result)
-                write_text(directory / "report.md", render_final(state, result))
                 store.indexes()
     return state
 
@@ -110,9 +110,9 @@ def start_detached(directory: Path, config_path: Path, *, resume: bool = False) 
             state.pop("failure_code", None)
             state.pop("message", None)
             result["status"] = "RESUMING"
+            publish_reports(directory, state, result)
             atomic_json(directory / "status.json", state)
             atomic_json(directory / "result.json", result)
-            write_text(directory / "report.md", render_final(state, result))
         argv = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path),
                 "_execute", "--run", state["run_id"], "--json"]
         if resume:
