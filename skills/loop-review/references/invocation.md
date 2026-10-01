@@ -23,10 +23,15 @@ directory means the same repository (including worktrees); separate clones diffe
 
 Targets:
 
-- `design`: `file` or `text` with `content`.
+- `design`: `file`, `files` with a nonempty unique `paths` array, or `text` with `content`.
 - `code`: `working-tree`, or `git-range` with `base` and optional `head` (default HEAD).
 - `review`: target plus `seed_review` (`file` or `text`). Seed claims are part of the
   requested input and are independently verified against the target.
+
+For a complete review of several documents, use e.g. `"target": {"kind": "files",
+"paths": ["/repo/docs/proposal.md", "/repo/docs/runtime.md"]}`. Every listed file is
+required reading and fingerprinted; applicable nested AGENTS.md files are included.
+Do not set one representative target and rely on prose references for mandatory scope.
 
 For a changed version, create a new run. Set `previous_run_id` to explicitly link
 unresolved claims from a terminal v2 run of the same repository/task. History is

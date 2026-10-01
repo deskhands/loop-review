@@ -16,7 +16,7 @@ class FullFlowTests(ReviewCase):
         self.assertIn('运行时迁移', str(directory))
         self.assertIn('初版方案审核', directory.name)
         self.assertEqual(state['run_id'], state['job_id'])
-        self.assertIn('report.md', (directory.parent / 'README.md').read_text())
+        self.assertIn('final-review.md', (directory.parent / 'README.md').read_text())
         self.assertTrue((directory / 'report.md').is_file())
 
     def test_two_discoveries_are_cross_verified_in_four_tasks(self):

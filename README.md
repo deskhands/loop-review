@@ -73,18 +73,26 @@ loop-review/
         ├── task.json
         ├── README.md
         └── 2026-09-30_193000__design__修改方案复核__a1b2c3d4/
-            ├── report.md
+            ├── final-review.md       # standalone review and recommendations
+            ├── report.md             # identical compatibility copy
             ├── status.json
             ├── result.json
             ├── manifest.json
             ├── input/
             └── audit/
+                └── execution.md     # usage, limits and process diagnostics
 ```
 
 Titles identify the purpose; IDs identify exact runs. The same run ID is used for
 background job commands. Root/repository/task indexes link reports and show the
 latest known phase or conclusion. `status.json` is authoritative; controller logs
-and prior resume snapshots never override it.
+and prior resume snapshots never override it. `report_path` points to
+`final-review.md`. Hand that single document to the user or another agent: it
+contains the request, target snapshot, coverage limits, classified findings,
+cross-check evidence and recommended actions. Process artifacts are for diagnosis.
+An unresolved review still has a final document; it does not imply full coverage
+or target approval. The initiating agent completes a bounded synthesis in that
+document using existing evidence, without another paid reviewer call.
 
 Supply `task.id`, `task.title`, and a run `title` in the
 [invocation](skills/loop-review/references/invocation.md). A matching title alone
@@ -129,16 +137,41 @@ expand: new defects remain unverified, and disagreement is a terminal outcome.
 Open questions prevent a passing conclusion.
 
 Default limits include six **total task attempts across resume**, 32 turns per
-task, 48 tool calls, three identical calls, two exposed provider retries, two million
+task, 96 tool calls, three identical calls, two exposed provider retries, eight million
 known cumulative tokens and 30 minutes of cumulative active execution. Limits can
 be configured before starting a run. Token totals include cached reads; an in-flight
 request may overshoot the ceiling. Unavailable usage/cost is explicitly unknown,
 and CLI-reported costs are not necessarily provider billing.
 
+The token ceiling is split equally between reviewers, with three quarters of each
+share for discovery and one quarter reserved for verification: 3M + 1M per reviewer
+by default. Fixes-only runs use the entire 4M share for verification. Failed attempts
+and resume consume the same phase allocation; unused allocations are not borrowed.
+Exhausting a phase stops that worker with `TASK_BUDGET_EXCEEDED`, allowing the peer
+to finish. Cancellation, active-time and total-run limits still stop both workers.
+
+Each reviewer reads only its own `audit/<phase>/<reviewer>/live-budget.json`, which
+shows remaining allowance without revealing peer progress. At 75% of tokens, turns
+or tools, it requests concise output and records a coverage follow-up question;
+such results cannot silently become a passing review. This finish request requires
+model cooperation; the hard ceiling remains enforced by the controller. Budget
+polls count as tools but are exempt from identical-read detection. Prompts guide
+focused auxiliary reads while requiring complete target and AGENTS.md coverage.
+
 Events and stderr are written during execution. Live status shows phase, task
 attempts, active time, last event, turns, tools and known usage. Timeouts, cancellation
 and limits terminate entire worker process groups. Failures preserve successful
 peer evidence and generate an incomplete report.
+
+Turn limits use observed assistant calls. Claude's terminal `num_turns` is a
+separate audit counter; it can differ when a response invokes several tools.
+Successful terminal output rejected by the former counter mismatch can be recovered
+after replay and exact-input validation, without repeating discovery. Original
+failure artifacts remain intact and `recovery.json` records the corrected usage.
+
+Multi-document design reviews use `target.kind: "files"` with every required path;
+all files and their nested AGENTS.md rules are fingerprinted. One representative
+target with other documents mentioned only in prose is insufficient scope control.
 
 Resume reuses only exact call-input checkpoints (prompt, repository/target/policy
 fingerprint, reviewer configuration and protocol), validates checksums, and may

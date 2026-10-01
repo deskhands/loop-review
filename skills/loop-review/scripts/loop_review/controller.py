@@ -13,12 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .adapters import ClaudeAdapter, PiAdapter
 from .agents_rules import discover_rules
-from .execution import DEFAULT_LIMITS
+from .execution import DEFAULT_LIMITS, EventMonitor
 from .git_state import (ensure_repo, git_range_fingerprint, repo_meta, working_tree_fingerprint,
                         write_range_diff, write_working_tree_diff)
 from .ledger import discovery_claims, final_status, resolve_claims
 from .prompts import build_prompt
-from .renderer import render_final
+from .renderer import publish_reports
 from .schemas import validate_result
 from .store import RunStore, timestamp
 from .util import LoopReviewError, atomic_json, expand_path, load_json, sha256_bytes, sha256_file, write_text
@@ -106,6 +106,16 @@ class LoopReviewController:
             except ValueError:
                 target_paths = []
             target_description = f"Read and review this complete target file: {target_path}"
+        elif target_kind == 'files':
+            paths = target.get('paths')
+            if not isinstance(paths, list) or not paths or any(not isinstance(p, str) for p in paths):
+                raise LoopReviewError('INVALID_INVOCATION', 'files target requires a nonempty paths list')
+            target_paths = [expand_path(path) for path in paths]
+            if len(target_paths) != len(set(target_paths)):
+                raise LoopReviewError('INVALID_INVOCATION', 'files target must not contain duplicate paths')
+            for index, path in enumerate(target_paths):
+                self._persist_source({'kind': 'file', 'path': str(path)}, input_dir, f'target-{index:03d}')
+            target_description = 'Read and review EVERY complete target file: ' + json.dumps([str(p) for p in target_paths])
         elif target_kind == "working-tree":
             if mode == "design":
                 raise LoopReviewError("INVALID_INVOCATION", "design mode does not support working-tree target")
@@ -151,7 +161,7 @@ class LoopReviewController:
         policy_paths = [x["path"] for x in rules["files"]]
 
         read_dirs: List[Path] = []
-        for candidate in (target_path, seed_review_path):
+        for candidate in (*target_paths, target_path, seed_review_path):
             if candidate is None:
                 continue
             try:
@@ -213,6 +223,9 @@ class LoopReviewController:
                 "sha256": sha256_file(target_path),
                 "size": target_path.stat().st_size,
             }
+        elif kind == 'files':
+            base_fp['target_files'] = [{'path': str(p), 'sha256': sha256_file(p), 'size': p.stat().st_size}
+                                       for p in prepared['target_paths']]
         elif kind == "working-tree" and target_path:
             base_fp["target_artifact"] = {
                 "path": str(target_path),
@@ -309,6 +322,11 @@ class LoopReviewController:
             except ValueError:
                 target_paths = []
             target_description = f"Read and review this complete target file: {target_path}"
+        elif target_kind == 'files':
+            for index, raw_path in enumerate(target['paths']):
+                _, path = self._load_persisted_source({'kind': 'file', 'path': raw_path}, input_dir, f'target-{index:03d}')
+                target_paths.append(path)
+            target_description = 'Read and review EVERY complete target file: ' + json.dumps([str(p) for p in target_paths])
         elif target_kind == "working-tree":
             target_path = input_dir / "target.diff"
             if not target_path.is_file():
@@ -350,7 +368,7 @@ class LoopReviewController:
         rules = load_json(input_dir / "agents-map.json")
         policy_paths = [item["path"] for item in rules["files"]]
         read_dirs: List[Path] = []
-        for candidate in (target_path, seed_review_path):
+        for candidate in (*target_paths, target_path, seed_review_path):
             if candidate is None:
                 continue
             try:
@@ -443,6 +461,8 @@ class LoopReviewController:
             skill_root=self.skill_root, mode=prepared["mode"], request_text=prepared["request_text"],
             target_description=prepared["target_description"], policy_paths=prepared["policy_paths"],
             claims=claims, phase=phase, reviewer_alias=name,
+            budget_path=str(self.run_dir / 'audit' / phase / name / 'live-budget.json'),
+            token_limit=self._token_limit(phase), limits=self.config['limits'],
             seed_review_path=str(prepared["seed_review_path"]) if prepared.get("seed_review_path") else None,
         )
         if len(prompt.encode()) > self.config["limits"]["max_prompt_bytes"]:
@@ -459,18 +479,86 @@ class LoopReviewController:
             key = str(stream.parent.relative_to(self.run_dir / "audit"))
             stats = self.state["progress"].setdefault(key, {})
             stats.update(load_json(stream))
-            stats["status"] = "OK" if (stream.parent / "result.json").exists() else "FAILED"
+            corrected = self._terminal_turn_recovery(stream.parent)
+            if corrected is not None:
+                stats.update(corrected)
+            stats['status'] = ('RECOVERED' if (stream.parent / 'recovery.json').exists() else 'OK') if (stream.parent / 'result.json').exists() else 'FAILED'
+
+    def _terminal_turn_recovery(self, attempt: Path) -> Optional[Dict[str, Any]]:
+        # Recover only the known false rejection at a successful Claude terminal.
+        # Original failure artifacts remain immutable; other failures still retry.
+        error_path = attempt / 'error.json'
+        if not error_path.exists() or attempt.parent.name != 'reviewer-b':
+            return None
+        error = load_json(error_path)
+        if error.get('code') != 'TASK_LIMIT_EXCEEDED' or error.get('message') != 'Reviewer exceeded turns limit':
+            return None
+        stream = load_json(attempt / 'stream.json')
+        if stream.get('exit_code') is not None or (stream.get('turns') or 0) <= self.config['limits']['max_turns']:
+            return None
+        raw_path = attempt / 'raw.stdout'
+        try:
+            raw = raw_path.read_text()
+            terminal = json.loads(raw.rstrip().splitlines()[-1])
+            if (terminal.get('type') != 'result' or terminal.get('subtype') != 'success'
+                    or terminal.get('is_error') is not False
+                    or terminal.get('terminal_reason', 'completed') != 'completed'
+                    or terminal.get('num_turns') != stream.get('turns')):
+                return None
+            monitor = EventMonitor(self.config['limits'], budget_path=attempt.parent / 'live-budget.json')
+            for line in raw.splitlines():
+                monitor.feed(line)
+            if not monitor.stats['turns']:
+                return None
+            return monitor.stats
+        except (OSError, ValueError, IndexError, AttributeError, LoopReviewError):
+            return None
 
     def _elapsed(self) -> float:
         return self.prior_elapsed + (time.monotonic() - self.session_started if self.session_started else 0)
 
+    def _token_limit(self, phase: str) -> int:
+        share = self.config['limits']['max_total_tokens'] // len(self.reviewers)
+        if self.state['scope'] == 'fixes':
+            return share if phase == 'verification' else 0
+        discovery = share * 3 // 4
+        return discovery if phase == 'discovery' else share - discovery
+
+    def _budget(self, phase: str, name: str) -> Dict[str, Any]:
+        attempts = [item for key, item in self.state['progress'].items() if key.startswith(f'{phase}/{name}/')]
+        known = [item['total_tokens'] for item in attempts if item.get('total_tokens') is not None]
+        tokens = sum(known)
+        limit = self._token_limit(phase)
+        limits = self.config['limits']
+        finish = (bool(known) and tokens * 4 >= limit * 3) or any(
+            item.get('finish_requested') or item.get('turns', 0) * 4 >= limits['max_turns'] * 3
+            or item.get('tool_calls', 0) * 4 >= limits['max_tool_calls'] * 3 for item in attempts)
+        return {'token_limit': limit, 'known_tokens': tokens if known else None,
+                'usage_unknown': not attempts or len(known) != len(attempts),
+                'remaining_tokens': max(0, limit - tokens), 'action': 'finish' if finish else 'inspect',
+                'max_turns': limits['max_turns'], 'max_tool_calls': limits['max_tool_calls']}
+
+    def _coverage_question(self, result: Dict[str, Any], phase: str, name: str) -> Dict[str, Any]:
+        with self.lock:
+            if self._budget(phase, name)['action'] == 'finish':
+                question = f'{phase}/{name}: resource warning reached; complete scope coverage requires follow-up.'
+                if question not in result['open_questions']:
+                    result['open_questions'].append(question)
+        return result
+
     def _publish(self) -> None:
         self.state["updated_at"] = timestamp()
         self.state["elapsed_seconds"] = round(self._elapsed(), 3)
+        self.state['budgets'] = {}
+        for phase in ('discovery', 'verification'):
+            for name in self.reviewers:
+                budget = self._budget(phase, name)
+                self.state['budgets'][f'{phase}/{name}'] = budget
+                atomic_json(self.run_dir / 'audit' / phase / name / 'live-budget.json', budget)
         self.result["status"] = self.state["status"]
+        publish_reports(self.run_dir, self.state, self.result)
         atomic_json(self.run_dir / "status.json", self.state)
         atomic_json(self.run_dir / "result.json", self.result)
-        write_text(self.run_dir / "report.md", render_final(self.state, self.result))
 
     def _check_budget(self) -> None:
         with self.lock:
@@ -489,10 +577,23 @@ class LoopReviewController:
     def _progress(self, key: str, stats: Dict[str, Any]) -> None:
         with self.lock:
             self.state["progress"][key].update(stats)
+            phase, name, _ = key.split('/')
+            budget = self._budget(phase, name)
+            if budget['action'] == 'finish':
+                self.state['progress'][key]['finish_requested'] = True
+            atomic_json(self.run_dir / 'audit' / phase / name / 'live-budget.json', budget)
             if time.monotonic() - self.last_publish >= 0.5:
                 self._publish()
                 self.last_publish = time.monotonic()
+            self._check_worker_budget(phase, name)
+
+    def _check_worker_budget(self, phase: str, name: str) -> None:
+        with self.lock:
             self._check_budget()
+            budget = self._budget(phase, name)
+            if (budget['known_tokens'] or 0) >= budget['token_limit']:
+                raise LoopReviewError('TASK_BUDGET_EXCEEDED',
+                                      f'{phase}/{name} exhausted its cumulative token allocation')
 
     def _checkpoint(
         self, slot: Path, digest: str, prepared: Dict[str, Any], ids: List[str], name: str,
@@ -512,16 +613,30 @@ class LoopReviewController:
             call_path, stream_path = attempt / "call.json", attempt / "stream.json"
             if not call_path.exists() or not stream_path.exists() or load_json(call_path).get("digest") != digest:
                 continue
+            corrected = None
             if load_json(stream_path).get("exit_code") != 0:
+                corrected = self._terminal_turn_recovery(attempt)
+            if load_json(stream_path).get("exit_code") != 0 and corrected is None:
                 continue
             try:
                 raw = (attempt / "raw.stdout").read_text()
                 result = validate_result(self.reviewers[name].parse_saved_output(raw), prepared["policy_paths"], ids)
             except (LoopReviewError, OSError):
                 continue
+            result = self._coverage_question(result, slot.parent.name, name)
+            if corrected is not None:
+                with self.lock:
+                    key = str(attempt.relative_to(self.run_dir / 'audit'))
+                    self.state['progress'][key].update(corrected)
+                    self._check_worker_budget(slot.parent.name, name)
+                atomic_json(attempt / 'recovery.json', {'reason': 'terminal_turn_accounting',
+                            'raw_sha256': sha256_file(attempt / 'raw.stdout'), 'stats': corrected})
             atomic_json(attempt / "result.json", result)
             atomic_json(checkpoint, {"digest": digest, "attempt": attempt.name,
                                      "result_sha256": sha256_file(attempt / "result.json")})
+            with self.lock:
+                key = str(attempt.relative_to(self.run_dir / 'audit'))
+                self.state['progress'][key]['status'] = 'RECOVERED' if corrected is not None else 'OK'
             return result
         return None
 
@@ -539,7 +654,7 @@ class LoopReviewController:
         if cached is not None:
             return cached
         with self.lock:
-            self._check_budget()
+            self._check_worker_budget(phase, name)
             if self.state["review_calls"] >= self.config["limits"]["max_task_attempts"]:
                 raise LoopReviewError("RUN_BUDGET_EXCEEDED", "Cumulative reviewer attempt budget exhausted")
             self.state["review_calls"] += 1
@@ -552,11 +667,12 @@ class LoopReviewController:
         adapter = self.reviewers[name]
         adapter.limits = self.config["limits"]
         adapter.progress = lambda stats: self._progress(key, stats)
-        adapter.cancel = self._check_budget
+        adapter.cancel = lambda: self._check_worker_budget(phase, name)
         response = None
         try:
             response = adapter.review(prompt, prepared["repo"], self.run_dir, attempt, prepared["read_dirs"])
             result = validate_result(response["result"], prepared["policy_paths"], ids)
+            result = self._coverage_question(result, phase, name)
             atomic_json(attempt / "result.json", result)
             atomic_json(attempt / "meta.json", response["meta"])
             atomic_json(slot / "checkpoint.json", {"digest": digest, "attempt": attempt.name,
@@ -684,7 +800,7 @@ class LoopReviewController:
         self._publish()
         self.store.indexes()
         error.details = {"run_dir": str(self.run_dir), "run_id": self.state["run_id"],
-                         "status_path": str(self.run_dir / "status.json"), "report_path": str(self.run_dir / "report.md")}
+                         "status_path": str(self.run_dir / "status.json"), "report_path": self.state['report_path']}
         return error
 
     def run(self, invocation_path: Path, dry_run: bool = False) -> Dict[str, Any]:

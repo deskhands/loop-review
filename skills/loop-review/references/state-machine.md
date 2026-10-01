@@ -32,12 +32,34 @@ reviewer configuration and protocol, and a saved result checksum. Completed raw
 responses may be recovered without another task. Changed source/configuration
 fails closed; v1 workflows are inspection-only, with no migration exceptions.
 
+The former terminal CLI-turn false rejection is recoverable only with an exact
+call digest, a successful terminal, validated structured output, replayed observed
+assistant/tool counts within limits and available cumulative budget. Original
+raw/stream/error files remain unchanged; recovery.json records the replay. True
+limit failures, error terminals and partial streams do not qualify.
+
 Limits apply to all attempts across resume. Known token usage includes cached
 reads; missing usage/cost stays unknown. Tokens are observed at event boundaries,
 so one in-flight request may overshoot a limit. Provider retries are capped where
 exposed as events. Wall time, turns, tools, repeated calls, prompt/output size and
 cancellation also bound tasks. Active wall time is checkpointed during supervision;
 waiting between resumes does not spend active time. No automatic full-task retries.
+
+Turns count observed assistant calls (Pi turn_start or unique Claude message ID).
+CLI terminal num_turns is retained separately; it does not overwrite that counter.
+
+Token allocations are fixed: each reviewer receives half the run ceiling, with
+75% for discovery and 25% reserved for verification. Fixes-only verification gets
+the entire reviewer share. Every attempt consumes its phase allowance. A phase
+ceiling raises TASK_BUDGET_EXCEEDED for that worker; the peer may finish. The run
+then reports FAILED with partial evidence. Global limits/cancellation still stop
+both workers. Unused allowances are not transferred.
+
+Private live-budget.json files contain only their reviewer's phase allowance and
+usage. At 75% of tokens, turns or tools, action becomes finish. This asks the model
+to return evidence and missing coverage; the controller also adds an open question
+so early output cannot imply a complete pass. Hard limits remain independent of
+cooperation. Changed budget policy/prompts require a new run, not legacy resume.
 
 Raw stdout/stderr are streamed into immutable attempt directories under `audit/`.
 Cancellation/timeouts terminate worker process groups and preserve partial events.

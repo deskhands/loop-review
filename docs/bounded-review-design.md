@@ -55,6 +55,19 @@ active execution time across the run; waiting between resumes is not active time
 Live usage is observed at event boundaries, so an in-flight provider request can
 overshoot the token ceiling. Unavailable usage/cost is explicitly unknown.
 
+Use the existing total-token setting to derive equal reviewer shares and fixed
+3:1 discovery/verification allocations. Fixes-only verification gets the full
+reviewer share. Do not lend unused tokens between workers or phases. Enforce each
+allocation over all attempts, stopping only the exhausted worker; retain the
+global time/cancel/token guard. Default total is 8M including cached tokens.
+
+Provide a private live budget file per reviewer/phase. At 75% of known tokens,
+turns or tools, request final output with uncovered scope in open questions. A
+controller-added coverage question prevents a resource-limited result from passing
+silently, including checkpoint recovery. This is cooperative finishing, not a new
+model call or a guarantee of graceful completion. Keep hard caps and immutable
+attempts. Cache/input/output breakdowns explain consumption separately from cost.
+
 Stream stdout/stderr to attempt files immediately, update compact live progress,
 and terminate the entire worker process group on timeout/cancellation/limits.
 Do not automatically restart failed tasks. A user-requested resume consumes the

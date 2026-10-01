@@ -18,3 +18,7 @@ Return JSON conforming to `RESULT_SCHEMA` in `schemas.py`: summary, exact policy
 paths read, findings, adjudications and open questions. The controller owns IDs,
 rule-violation state and completion. `rule_refs` is reserved for listed AGENTS.md
 rules; other documents belong in evidence. No local ID graphs or freeze decisions.
+
+A non-blocking finding that cites AGENTS.md is retained with a policy-classification
+open question. A reference alone does not prove a violation; the controller neither
+promotes severity nor drops the evidence. Ambiguous classification prevents a pass.

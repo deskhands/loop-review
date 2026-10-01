@@ -30,6 +30,11 @@ class SchemaTests(unittest.TestCase):
         output = result('/repo/AGENTS.md', [issue])
         self.assertEqual(validate_result(output, ['/repo/AGENTS.md']), output)
         issue['blocking'] = False
+        checked = validate_result(output, ['/repo/AGENTS.md'])
+        self.assertFalse(checked['findings'][0]['blocking'])
+        self.assertTrue(any('Policy classification' in q for q in checked['open_questions']))
+        self.assertEqual(len(validate_result(checked, ['/repo/AGENTS.md'])['open_questions']), 1)
+        issue['rule_refs'][0]['path'] = '/unlisted/AGENTS.md'
         with self.assertRaises(LoopReviewError):
             validate_result(output, ['/repo/AGENTS.md'])
 

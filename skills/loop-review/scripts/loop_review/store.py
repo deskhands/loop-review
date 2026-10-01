@@ -88,7 +88,7 @@ class RunStore:
                 "scope": invocation.get("scope", "full"), "status": "INIT",
                 "run_dir": str(run_dir), "repo": str(repo), "started_at": timestamp(),
                 "updated_at": timestamp(), "review_calls": 0, "elapsed_seconds": 0.0,
-                "progress": {}, "report_path": str(run_dir / "report.md"),
+                "progress": {}, "report_path": str(run_dir / "final-review.md"),
                 "previous_run_id": invocation.get("previous_run_id"),
             })
         return run_dir
